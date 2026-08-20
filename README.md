@@ -30,28 +30,25 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 下载后解压，Windows 双击 `install-windows.bat`；macOS 双击 `install-macos.command`。
 
-在 Codex 对话中运行：
+直接运行安装脚本时，脚本会隐藏提示你输入自己的 API Key，并自动配置固定图片接口 `https://eos.manyuvip.com` 和 `gpt-image-2`。安装完成后重启 Codex 即可，不需要再手动填写环境变量。
 
-In a Codex conversation, run:
+### 在 Codex 中拉取
+
+也可以在 Codex 对话中运行：
 
 ```text
 $skill-installer https://github.com/kritpp/Matrixapi-imagegen/tree/main/skills/Matrixapi-imagegen
 ```
 
+这种方式只安装 Skill 文件，不会自动配置图片接口。拉取完成后，需要自己设置接口地址、API Key 和模型。
+
 如果 Skill 没有立即出现，重启一次 Codex。
 
 Restart Codex once if the Skill does not appear immediately.
 
-也可以使用压缩包内的一键安装文件：
+## 手动配置 Configure（仅 Codex 拉取方式需要）
 
-- Windows：双击 `install-windows.bat`
-- macOS：双击 `install-macos.command`
-
-安装程序会复制 Skill、设置配置并检查本地配置，不会发起实际生图请求。
-
-## 配置 Configure
-
-请使用你在 MatrixAI 网站生成的 API Key。不要把 Key 提交到 GitHub，也不要把 Key 发到聊天中。
+如果你使用 Codex 拉取方式，请使用你在 MatrixAI 网站生成的 API Key 手动配置。直接运行安装脚本的用户不需要重复设置。不要把 Key 提交到 GitHub，也不要把 Key 发到聊天中。
 
 Use an API key created on your MatrixAI site. Never commit the key to GitHub or send it in chat.
 
@@ -59,7 +56,7 @@ Windows PowerShell:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("IMAGEGEN_BASE_URL", "https://eos.manyuvip.com", "User")
-[Environment]::SetEnvironmentVariable("IMAGEGEN_API_KEY", "<your-relay-key>", "User")
+[Environment]::SetEnvironmentVariable("IMAGEGEN_API_KEY", "<your-api-key>", "User")
 [Environment]::SetEnvironmentVariable("IMAGEGEN_MODEL", "gpt-image-2", "User")
 ```
 
@@ -67,7 +64,7 @@ Linux/macOS:
 
 ```bash
 export IMAGEGEN_BASE_URL="https://eos.manyuvip.com"
-export IMAGEGEN_API_KEY="<your-relay-key>"
+export IMAGEGEN_API_KEY="<your-api-key>"
 export IMAGEGEN_MODEL="gpt-image-2"
 ```
 
