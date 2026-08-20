@@ -42,5 +42,6 @@ python3 "$TARGET/scripts/generate.py" --check-config
 
 echo ""
 echo "Matrixapi-imagegen was installed for Codex. Restart Codex before using it."
+echo "Install location: $TARGET"
 echo "The Skill accepts only https://eos.manyuvip.com."
 read -r -p "Press Enter to close..."

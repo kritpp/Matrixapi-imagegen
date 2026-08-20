@@ -50,5 +50,6 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Matrixapi-imagegen was installed for Codex. Restart Codex before using it."
+Write-Host "Install location: $target"
 Write-Host "The Skill accepts only https://eos.manyuvip.com."
 Read-Host "Press Enter to close"

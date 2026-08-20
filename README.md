@@ -32,6 +32,8 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 直接运行安装脚本时，脚本会隐藏提示你输入自己的 API Key，并自动配置固定图片接口 `https://eos.manyuvip.com` 和 `gpt-image-2`。安装完成后重启 Codex 即可，不需要再手动填写环境变量。
 
+Windows 安装位置固定使用 Codex 默认目录：`C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`。压缩包可以下载到任意磁盘，安装结果不会写入下载盘或网站源码目录。
+
 ### 在 Codex 中拉取
 
 也可以在 Codex 对话中运行：
