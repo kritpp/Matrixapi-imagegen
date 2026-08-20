@@ -1,0 +1,7 @@
+interface:
+  display_name: "Matrix API 图片生成与编辑"
+  short_description: "通过兼容图片接口生成、参考图编辑和蒙版局部重绘"
+  default_prompt: "使用 $Matrixapi-imagegen 根据我的描述生成或编辑一张图片并显示结果。"
+
+policy:
+  allow_implicit_invocation: true
