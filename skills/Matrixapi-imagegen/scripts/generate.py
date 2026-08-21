@@ -25,7 +25,9 @@ import uuid
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_BASE_URL = "https://eos.manyuvip.com"
 ALLOWED_BASE_HOST = "eos.manyuvip.com"
-DEFAULT_RESPONSE_FORMAT = "b64_json"
+# Leave the response format to the relay unless the caller explicitly selects one.
+# This preserves the original fast URL response path while still accepting b64_json.
+DEFAULT_RESPONSE_FORMAT = ""
 CONFIG_FILE = Path.home() / ".codex" / "Matrixapi-imagegen.env"
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
@@ -33,6 +35,7 @@ MAX_EDGE = 3840
 MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MAX_INPUT_IMAGES = 7
+EDIT_MAX_EDGE = 1792
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 
@@ -173,8 +176,8 @@ def discover_credentials() -> tuple[str, str, str, str]:
 
 
 def response_format() -> str:
-    value = _environment_value("IMAGEGEN_RESPONSE_FORMAT") or DEFAULT_RESPONSE_FORMAT
-    if value not in {"b64_json", "url"}:
+    value = _environment_value("IMAGEGEN_RESPONSE_FORMAT").lower()
+    if value not in {"", "b64_json", "url"}:
         raise ImageGenError(
             "IMAGEGEN_RESPONSE_FORMAT must be b64_json or url"
         )
@@ -360,8 +363,9 @@ def call_api(
         "prompt": prompt,
         "size": size,
         "n": count,
-        "response_format": output_format,
     }
+    if output_format:
+        payload["response_format"] = output_format
     if options:
         payload.update(options)
     return _post_image_request(
@@ -468,8 +472,9 @@ def call_edit_api(
         ("prompt", prompt),
         ("size", size),
         ("n", str(count)),
-        ("response_format", output_format),
     ]
+    if output_format:
+        fields.append(("response_format", output_format))
     if options:
         fields.extend(options.items())
 
@@ -578,15 +583,36 @@ def _infer_edit_size(path_value: str) -> str:
     suffix = _image_extension(data, content_type)
     try:
         width, height = _image_dimensions(data, suffix)
-        return validate_size(f"{width}x{height}")
+        return edit_working_size(validate_size(f"{width}x{height}"))
     except ImageGenError:
         # Small, oversized, or otherwise provider-incompatible inputs use the
         # documented fast-path size rather than causing a second API request.
         return "1024x1024"
 
 
+def edit_working_size(size: str) -> str:
+    """Keep ordinary edits in the relay's fast working range."""
+    width, height = (int(value) for value in size.split("x"))
+    long_edge = max(width, height)
+    if long_edge <= EDIT_MAX_EDGE:
+        return size
+    scale = EDIT_MAX_EDGE / long_edge
+    working_width = max(16, int(width * scale) // 16 * 16)
+    working_height = max(16, int(height * scale) // 16 * 16)
+    while max(working_width, working_height) > 3 * min(working_width, working_height):
+        if working_width >= working_height:
+            working_width -= 16
+        else:
+            working_height -= 16
+    return validate_size(f"{working_width}x{working_height}")
+
+
 def _completion_marker(output_dir: Path, request_id: str) -> Path:
     return output_dir / f".completed-{request_id}.json"
+
+
+def _result_file(output_dir: Path, request_id: str) -> Path:
+    return output_dir / f".result-{request_id}.json"
 
 
 def _resolution_label(width: int, height: int) -> str:
@@ -842,6 +868,26 @@ def main() -> int:
             request_id,
         )
         marker.parent.mkdir(parents=True, exist_ok=True)
+        result_payload = {
+            "request_id": request_id,
+            "ok": True,
+            "mode": mode,
+            "model": model,
+            "count": len(images),
+            "size": size,
+            "input_images": len(image_paths),
+            "mask": bool(args.mask),
+            "files": [image["path"] for image in images],
+            "images": images,
+        }
+        # Persist the complete result before stdout. Codex can read this exact
+        # task result if its terminal bridge loses stdout after the process exits.
+        result_path = _result_file(output_dir, request_id)
+        result_temp = result_path.with_suffix(result_path.suffix + ".part")
+        result_temp.write_text(
+            json.dumps(result_payload, ensure_ascii=False), encoding="utf-8"
+        )
+        result_temp.replace(result_path)
         marker_temp = marker.with_suffix(marker.suffix + ".part")
         marker_temp.write_text(
             json.dumps({"request_id": request_id, "completed": True}, ensure_ascii=False),
@@ -849,21 +895,7 @@ def main() -> int:
         )
         marker_temp.replace(marker)
         print(
-            json.dumps(
-                {
-                    "request_id": request_id,
-                    "ok": True,
-                    "mode": mode,
-                    "model": model,
-                    "count": len(images),
-                    "size": size,
-                    "input_images": len(image_paths),
-                    "mask": bool(args.mask),
-                    "files": [image["path"] for image in images],
-                    "images": images,
-                },
-                ensure_ascii=False,
-            )
+            json.dumps(result_payload, ensure_ascii=False), flush=True
         )
         return 0
     except ImageGenError as exc:
