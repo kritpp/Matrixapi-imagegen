@@ -26,29 +26,73 @@ conversation response concise.
 - Do not claim that this external Skill can create Codex's native image-generation
   shimmer card; that UI belongs to Codex itself.
 
+## Hard execution boundaries
+
+- Treat one user request as one task. Create one task ID and run the image command
+  once. A successful response is a terminal state: stop immediately after showing
+  the returned image and path.
+- Never judge whether the returned picture matches the prompt and never start a
+  second generation, edit, resize, upscale, OCR pass, file scan, or skill reload
+  automatically. A visual mismatch is not a failure of the request.
+- Only run another API request when the user explicitly asks for `重试`, `重新生成`,
+  or another clearly new edit. Keep the new request separate from the prior task
+  and use its newly returned `images` only.
+- For an explicit retry of the same task ID, add `--allow-repeat`; never add this
+  flag to an ordinary request.
+- Do not search the output directory for the latest file, reuse a path from another
+  conversation, or display a file that is not present in the current command's
+  `images` array and verified on disk.
+- Do not add a configuration check before an ordinary request. Do not expose command
+  output, parameter analysis, or implementation details in the user-facing reply.
+
 ## Workflow
 
 1. Resolve `scripts/generate.py` relative to this `SKILL.md` file.
 2. Turn the user's request into a complete image prompt. Preserve requested subject, composition, style, lighting, colors, text, and constraints. Do not invent identifying details. When the user supplies a local image, pass it as `--image`; pass a supplied mask as `--mask`.
-3. Choose the requested size, or use `1024x1024` when none is given. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for landscape 2K, `3840x2160` for landscape 4K, and `2160x3840` for portrait 4K. Both edges must be multiples of 16, the longest edge must not exceed 3840 pixels or three times the shorter edge, and total pixels must be between 655,360 and 8,294,400.
+   Classify an edit from the request without adding extra API calls:
+   - **Text/translation/replacement:** preserve the original layout and non-text
+     content. If the user asks for exact text, translation accuracy, or sharper
+     lettering, use the precision path (`--quality high --input-fidelity high`) and
+     state the exact replacement text in the prompt.
+   - **Person/background/object/local change:** use edit mode with the supplied
+     reference image. If the user supplies a mask, pass it unchanged; otherwise
+     describe the target region precisely and do not invent a mask file.
+   - **Whole-image redesign:** use generation mode unless the user explicitly asks
+     to preserve the supplied image.
+   These paths are routing decisions for the single request, not permission to
+   retry or post-process it. The API/model remains responsible for final text
+   rendering and pixel-level fidelity.
+3. Choose the requested size. For an edit without an explicit size, preserve the
+   first input image's dimensions when they satisfy the API limits; otherwise use
+   `1024x1024`. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for
+   landscape 2K, `3840x2160` for landscape 4K, and `2160x3840` for portrait 4K.
+   Both edges must be multiples of 16, the longest edge must not exceed 3840 pixels
+   or three times the shorter edge, and total pixels must be between 655,360 and
+   8,294,400.
 4. Choose the request mode automatically: no `--image` uses `/v1/images/generations`; one or more `--image` files uses multipart `/v1/images/edits`; `--mask` is optional for edit/inpaint requests. Repeat `--image` for multiple reference images, up to seven.
 5. Use the fast path by default: run one request with `--n 1`, without OCR, post-processing, automatic retries, or configuration checks.
-6. If the user explicitly says `精准文字`, add `--quality high`. If the user explicitly says `精准重绘`, add `--quality high --input-fidelity high`. These opt-in paths may be slower; do not enable them for ordinary requests.
+6. For an explicit precision text/edit request, add `--quality high --input-fidelity high`
+   in that same request. Do not silently run a second high-quality pass. These
+   opt-in parameters may be slower; do not enable them for ordinary requests.
 7. For a follow-up such as `把刚才的图片...`, reuse the exact last generated absolute path from the current conversation as `--image`. Preserve the current image, mask, size, composition, and style; replace only the requested change. If the user supplies a new image, start a new edit context. Never silently turn a follow-up edit into text-to-image generation.
 8. Run a generation:
 
    ```text
-   python <skill-directory>/scripts/generate.py --prompt "<prompt>" --size <WIDTHxHEIGHT> --n 1
+   python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<prompt>" --size <WIDTHxHEIGHT> --n 1
    ```
 
    For an edit with an original image:
 
    ```text
-   python <skill-directory>/scripts/generate.py --prompt "<edit instructions>" --image "<path>" --n 1
+   python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --image "<path>" --n 1
    ```
 
    For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
-9. Parse the JSON written to stdout. For every item in `images`, show the verified dimensions and format, render the image from `display_path`, provide the corresponding 1K/2K/4K original-file link, and state the absolute `path`. The `files` array exists only for backward compatibility.
+9. Parse the JSON written to stdout. Require the returned `request_id` to match the
+   current task ID. For every item in `images`, show the verified dimensions and
+   format, render the image from `display_path`, provide the corresponding 1K/2K/4K
+   original-file link, and state the absolute `path`. The `files` array exists only
+   for backward compatibility.
 10. If generation or editing fails, report the sanitized error. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Updating the Skill

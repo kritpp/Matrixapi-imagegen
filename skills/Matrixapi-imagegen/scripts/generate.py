@@ -572,6 +572,23 @@ def _image_dimensions(data: bytes, suffix: str) -> tuple[int, int]:
     raise ImageGenError("Unable to read the generated image dimensions")
 
 
+def _infer_edit_size(path_value: str) -> str:
+    """Keep an edit at the source resolution when that resolution is supported."""
+    _, content_type, data = _input_image(path_value, "Input image")
+    suffix = _image_extension(data, content_type)
+    try:
+        width, height = _image_dimensions(data, suffix)
+        return validate_size(f"{width}x{height}")
+    except ImageGenError:
+        # Small, oversized, or otherwise provider-incompatible inputs use the
+        # documented fast-path size rather than causing a second API request.
+        return "1024x1024"
+
+
+def _completion_marker(output_dir: Path, request_id: str) -> Path:
+    return output_dir / f".completed-{request_id}.json"
+
+
 def _resolution_label(width: int, height: int) -> str:
     longest = max(width, height)
     if longest >= 3000:
@@ -638,7 +655,12 @@ def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[by
 
 
 def save_images(
-    result: dict[str, Any], endpoint: str, key: str, output_dir: Path, timeout: int
+    result: dict[str, Any],
+    endpoint: str,
+    key: str,
+    output_dir: Path,
+    timeout: int,
+    request_id: str,
 ) -> list[dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -671,6 +693,7 @@ def save_images(
         resolved_path = str(final_path.resolve())
         images.append(
             {
+                "request_id": request_id,
                 "path": resolved_path,
                 "display_path": resolved_path.replace("\\", "/"),
                 "width": width,
@@ -686,6 +709,10 @@ def save_images(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt")
+    parser.add_argument(
+        "--request-id",
+        help="Caller-owned task identifier used to bind output to this request",
+    )
     parser.add_argument(
         "--image",
         "--reference-image",
@@ -705,13 +732,18 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Request mode; auto selects edit when --image is supplied",
     )
-    parser.add_argument("--size", default="1024x1024")
+    parser.add_argument("--size")
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality")
     parser.add_argument("--background")
     parser.add_argument("--input-fidelity")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument(
+        "--allow-repeat",
+        action="store_true",
+        help="Allow an explicit retry of a completed request ID",
+    )
     parser.add_argument("--check-config", action="store_true")
     return parser.parse_args()
 
@@ -721,11 +753,16 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = parse_args()
     try:
+        request_id = (args.request_id or uuid.uuid4().hex).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", request_id):
+            raise ImageGenError(
+                "Request ID must contain only letters, numbers, dots, underscores, or hyphens"
+            )
         if args.n < 1 or args.n > 4:
             raise ImageGenError("Image count must be between 1 and 4")
         if args.timeout < 10 or args.timeout > 600:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
-        size = validate_size(args.size)
+        size = validate_size(args.size or "1024x1024")
         base_url, key, model, source = discover_credentials()
         output_format = response_format()
         generation_url = generation_endpoint(base_url)
@@ -759,6 +796,16 @@ def main() -> int:
             raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
 
         mode = "edit" if image_paths else "generate"
+        if mode == "edit" and not args.size:
+            size = _infer_edit_size(image_paths[0])
+        output_dir = args.out_dir or (
+            Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
+        )
+        marker = _completion_marker(output_dir, request_id)
+        if marker.is_file() and not args.allow_repeat:
+            raise ImageGenError(
+                "This task ID has already completed; ask explicitly to retry before generating again"
+            )
         options = _option_fields(args.quality, args.background, args.input_fidelity)
         if mode == "edit":
             result = call_edit_api(
@@ -786,19 +833,25 @@ def main() -> int:
                 options,
                 output_format,
             )
-        output_dir = args.out_dir or (
-            Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
-        )
         images = save_images(
             result,
             edit_url if mode == "edit" else generation_url,
             key,
             output_dir,
             args.timeout,
+            request_id,
         )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker_temp = marker.with_suffix(marker.suffix + ".part")
+        marker_temp.write_text(
+            json.dumps({"request_id": request_id, "completed": True}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        marker_temp.replace(marker)
         print(
             json.dumps(
                 {
+                    "request_id": request_id,
                     "ok": True,
                     "mode": mode,
                     "model": model,
@@ -815,7 +868,10 @@ def main() -> int:
         return 0
     except ImageGenError as exc:
         print(
-            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            json.dumps(
+                {"ok": False, "request_id": request_id, "error": str(exc)},
+                ensure_ascii=False,
+            ),
             file=sys.stderr,
         )
         return 1

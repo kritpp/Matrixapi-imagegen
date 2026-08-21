@@ -26,7 +26,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 点击下面的链接即可直接从 GitHub 下载最新安装包：
 
-[**一键下载 Matrixapi-imagegen v1.1.2 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.1.2.zip)
+[**一键下载 Matrixapi-imagegen v1.1.3 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.1.3.zip)
 
 下载后解压，Windows 双击 `install-windows.bat`；macOS 双击 `install-macos.command`。
 
