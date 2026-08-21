@@ -79,6 +79,12 @@ The script discovers credentials in this order:
 
 MatrixAI must implement `POST /v1/images/generations` for new images and `POST /v1/images/edits` with multipart `image`/optional `mask` fields for editing. Responses may return either `data[].url` or `data[].b64_json`. The default model is `gpt-image-2`; set `IMAGEGEN_MODEL` only when using another model exposed by MatrixAI.
 
+The Skill requests `response_format=b64_json` by default so generated images can be
+saved locally without following a separate download address. If the configured API
+does not support Base64 responses, `IMAGEGEN_RESPONSE_FORMAT=url` may be set, but
+every returned URL and redirect must still remain on `eos.manyuvip.com`; external
+image hosts are rejected.
+
 To diagnose setup without generating or charging for an image, run:
 
 ```text

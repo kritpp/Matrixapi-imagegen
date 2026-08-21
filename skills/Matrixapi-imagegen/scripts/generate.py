@@ -25,6 +25,7 @@ import uuid
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_BASE_URL = "https://eos.manyuvip.com"
 ALLOWED_BASE_HOST = "eos.manyuvip.com"
+DEFAULT_RESPONSE_FORMAT = "b64_json"
 CONFIG_FILE = Path.home() / ".codex" / "Matrixapi-imagegen.env"
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
@@ -169,6 +170,15 @@ def discover_credentials() -> tuple[str, str, str, str]:
 
     model = _environment_value("IMAGEGEN_MODEL") or DEFAULT_MODEL
     return base_url, key, model, source
+
+
+def response_format() -> str:
+    value = _environment_value("IMAGEGEN_RESPONSE_FORMAT") or DEFAULT_RESPONSE_FORMAT
+    if value not in {"b64_json", "url"}:
+        raise ImageGenError(
+            "IMAGEGEN_RESPONSE_FORMAT must be b64_json or url"
+        )
+    return value
 
 
 def _validate_base_url(base_url: str) -> tuple[urllib.parse.ParseResult, str]:
@@ -342,6 +352,7 @@ def call_api(
     count: int,
     timeout: int,
     options: dict[str, str] | None = None,
+    output_format: str = DEFAULT_RESPONSE_FORMAT,
 ) -> dict[str, Any]:
     """Call the JSON generations endpoint."""
     payload: dict[str, Any] = {
@@ -349,6 +360,7 @@ def call_api(
         "prompt": prompt,
         "size": size,
         "n": count,
+        "response_format": output_format,
     }
     if options:
         payload.update(options)
@@ -444,6 +456,7 @@ def call_edit_api(
     mask_path: str | None,
     timeout: int,
     options: dict[str, str] | None = None,
+    output_format: str = DEFAULT_RESPONSE_FORMAT,
 ) -> dict[str, Any]:
     if not image_paths:
         raise ImageGenError("At least one --image file is required for editing")
@@ -455,6 +468,7 @@ def call_edit_api(
         ("prompt", prompt),
         ("size", size),
         ("n", str(count)),
+        ("response_format", output_format),
     ]
     if options:
         fields.extend(options.items())
@@ -570,16 +584,44 @@ def _resolution_label(width: int, height: int) -> str:
 def _decode_data_url(url: str) -> tuple[bytes, str]:
     header, encoded = url.split(",", 1)
     try:
-        return base64.b64decode(encoded, validate=True), header[5:].split(";", 1)[0]
+        return (
+            base64.b64decode(encoded.strip(), validate=True),
+            header[5:].split(";", 1)[0],
+        )
     except (binascii.Error, ValueError) as exc:
         raise ImageGenError("Image API returned invalid base64 image data") from exc
 
 
+def _decode_b64_image(value: str) -> tuple[bytes, str]:
+    """Decode raw b64_json and the data-URI variant used by some relays."""
+    value = value.strip()
+    if value.startswith("data:") and "," in value:
+        header, _ = value.split(",", 1)
+        if ";base64" not in header.lower():
+            raise ImageGenError("Image API returned invalid base64 image data")
+        return _decode_data_url(value)
+    try:
+        return base64.b64decode(value, validate=True), ""
+    except (binascii.Error, ValueError, TypeError) as exc:
+        raise ImageGenError("Image API returned invalid base64 image data") from exc
+
+
 def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[bytes, str]:
+    url = url.strip()
     if url.startswith("data:") and ";base64," in url:
         return _decode_data_url(url)
 
-    _validate_base_url(url)
+    # Relative image paths are resolved against the already validated MatrixAI
+    # endpoint. Absolute URLs and redirects are still checked against the same
+    # fixed host before any network request is made.
+    url = urllib.parse.urljoin(endpoint, url)
+    try:
+        _validate_base_url(url)
+    except ImageGenError as exc:
+        raise ImageGenError(
+            "Image API returned an image URL outside the configured domain; "
+            "configure it to return b64_json or a same-domain URL"
+        ) from exc
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ImageGenError("Image API returned an unsupported image URL")
@@ -608,10 +650,7 @@ def save_images(
             raise ImageGenError("Image API returned an invalid image item")
         content_type = ""
         if item.get("b64_json"):
-            try:
-                data = base64.b64decode(item["b64_json"], validate=True)
-            except (binascii.Error, ValueError, TypeError) as exc:
-                raise ImageGenError("Image API returned invalid base64 image data") from exc
+            data, content_type = _decode_b64_image(str(item["b64_json"]))
         elif item.get("url"):
             data, content_type = _download_image(
                 str(item["url"]), endpoint, key, timeout
@@ -688,6 +727,7 @@ def main() -> int:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
         size = validate_size(args.size)
         base_url, key, model, source = discover_credentials()
+        output_format = response_format()
         generation_url = generation_endpoint(base_url)
         edit_url = edit_endpoint(base_url)
         if args.check_config:
@@ -732,6 +772,7 @@ def main() -> int:
                 args.mask,
                 args.timeout,
                 options,
+                output_format,
             )
         else:
             result = call_api(
@@ -743,6 +784,7 @@ def main() -> int:
                 args.n,
                 args.timeout,
                 options,
+                output_format,
             )
         output_dir = args.out_dir or (
             Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"

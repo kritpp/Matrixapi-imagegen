@@ -26,7 +26,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 点击下面的链接即可直接从 GitHub 下载最新安装包：
 
-[**一键下载 Matrixapi-imagegen v1.1.1 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.1.1.zip)
+[**一键下载 Matrixapi-imagegen v1.1.2 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.1.2.zip)
 
 下载后解压，Windows 双击 `install-windows.bat`；macOS 双击 `install-macos.command`。
 
@@ -77,6 +77,8 @@ macOS 一键安装程序会把上述配置保存到 `~/.codex/Matrixapi-imagegen
 The macOS installer stores the configuration in `~/.codex/Matrixapi-imagegen.env` with local-only permissions. Environment variables are also supported.
 
 The base URL is optional because the Skill defaults to MatrixAI. If supplied, the script accepts only the `eos.manyuvip.com` host.
+
+默认会请求 `response_format=b64_json`，用于直接保存图片并避免跨域下载。只有当接口明确不支持 Base64 时，才设置 `IMAGEGEN_RESPONSE_FORMAT=url`；此时返回的图片 URL 和重定向仍必须是 `eos.manyuvip.com`。
 
 检查配置但不发起生图：
 
@@ -162,6 +164,15 @@ The relay must implement these OpenAI-compatible endpoints:
 - `POST /v1/images/generations` for text-to-image
 - `POST /v1/images/edits` for multipart image editing with `image` and optional `mask`
 - JSON responses with `data[].url` or `data[].b64_json`
+
+默认请求 `response_format=b64_json`，这样技能可直接保存图片，不需要访问单独的
+下载地址。若接口不支持 Base64，可设置 `IMAGEGEN_RESPONSE_FORMAT=url`；但返回 URL
+及重定向仍必须保持 `eos.manyuvip.com`，其他域名会被拒绝。
+
+The Skill requests `response_format=b64_json` by default so it can save images
+without following a separate download address. If the API does not support Base64,
+set `IMAGEGEN_RESPONSE_FORMAT=url`; returned URLs and redirects must still remain on
+`eos.manyuvip.com`, or they will be rejected.
 
 本 Skill 只允许连接 `eos.manyuvip.com`，不会自动连接其他域名。接口返回的图片 URL 也必须属于该域名，编辑参数是否被模型完全支持，以网站返回结果为准。
 
