@@ -39,9 +39,11 @@ conversation response concise.
   and use its newly returned `images` only.
 - For an explicit retry of the same task ID, add `--allow-repeat`; never add this
   flag to an ordinary request.
-- Do not search the output directory for the latest file, reuse a path from another
-  conversation, or display a file that is not present in the current command's
-  `images` array and verified on disk.
+- If the command exits without usable stdout, read only the exact sidecar
+  `~/.codex/generated_images/Matrixapi-imagegen/.result-<task-id>.json` for the
+  current task ID. Verify its listed files, then display that result. Never scan
+  for the latest file, inspect another task, or run the API again because stdout
+  was lost.
 - Do not add a configuration check before an ordinary request. Do not expose command
   output, parameter analysis, or implementation details in the user-facing reply.
 
@@ -62,9 +64,9 @@ conversation response concise.
    These paths are routing decisions for the single request, not permission to
    retry or post-process it. The API/model remains responsible for final text
    rendering and pixel-level fidelity.
-3. Choose the requested size. For an edit without an explicit size, preserve the
-   first input image's dimensions when they satisfy the API limits; otherwise use
-   `1024x1024`. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for
+3. Choose the requested size. For an ordinary edit without an explicit size, use
+   the source aspect ratio in the relay's fast working range; an explicit 2K or 4K
+   size is honored. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for
    landscape 2K, `3840x2160` for landscape 4K, and `2160x3840` for portrait 4K.
    Both edges must be multiples of 16, the longest edge must not exceed 3840 pixels
    or three times the shorter edge, and total pixels must be between 655,360 and
@@ -88,11 +90,12 @@ conversation response concise.
    ```
 
    For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
-9. Parse the JSON written to stdout. Require the returned `request_id` to match the
+9. Parse the JSON written to stdout. If stdout is empty after the process exits,
+   read the exact current-task result sidecar described above; this is a result
+   recovery step, not a retry. Require the returned `request_id` to match the
    current task ID. For every item in `images`, show the verified dimensions and
    format, render the image from `display_path`, provide the corresponding 1K/2K/4K
-   original-file link, and state the absolute `path`. The `files` array exists only
-   for backward compatibility.
+   original-file link, and state the absolute `path`.
 10. If generation or editing fails, report the sanitized error. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Updating the Skill
@@ -123,11 +126,11 @@ The script discovers credentials in this order:
 
 MatrixAI must implement `POST /v1/images/generations` for new images and `POST /v1/images/edits` with multipart `image`/optional `mask` fields for editing. Responses may return either `data[].url` or `data[].b64_json`. The default model is `gpt-image-2`; set `IMAGEGEN_MODEL` only when using another model exposed by MatrixAI.
 
-The Skill requests `response_format=b64_json` by default so generated images can be
-saved locally without following a separate download address. If the configured API
-does not support Base64 responses, `IMAGEGEN_RESPONSE_FORMAT=url` may be set, but
-every returned URL and redirect must still remain on `eos.manyuvip.com`; external
-image hosts are rejected.
+The Skill leaves the response format unspecified by default so the relay can use
+its fastest supported response. It accepts both `data[].url` and `data[].b64_json`.
+Set `IMAGEGEN_RESPONSE_FORMAT=b64_json` or `url` only when the relay requires a
+specific format; returned URLs and redirects must still remain on
+`eos.manyuvip.com`.
 
 To diagnose setup without generating or charging for an image, run:
 
