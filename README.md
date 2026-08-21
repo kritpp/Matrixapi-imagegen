@@ -96,6 +96,25 @@ Natural language prompts usually trigger the Skill automatically. Explicit invoc
 使用 $Matrixapi-imagegen 生成一张古装美女站在樱花树下的画面：春日柔光、粉色花瓣、精致汉服、自然姿态、电影感构图，不要文字。需要 4K 横图时指定 `3840x2160`。
 ```
 
+### Codex 调用规则
+
+- 在一个新建的 Codex 对话中，第一次使用时显式输入 `$Matrixapi-imagegen`。
+- 同一个对话后续继续生成、编辑或重绘时，不需要重复调用，直接描述新需求即可。
+- 新建另一个 Codex 对话时，需要在新对话中重新输入一次 `$Matrixapi-imagegen`；这只是启用当前对话，不是重新安装。
+- 技能开始任务后会直接执行，完成后显示图片和本地保存路径。
+
+### 后续自动更新
+
+完成支持更新功能的新版安装后，在 Codex 中输入：
+
+```text
+更新 Matrixapi-imagegen
+```
+
+Skill 会从本仓库获取最新版，替换自身文件并保留本机 API 配置。更新完成后重启 Codex；在新对话中重新调用一次 `$Matrixapi-imagegen` 即可。更新不使用系统 `$skill-installer`，因为系统安装器遇到同名目录会停止而不会覆盖。
+
+普通请求使用快速路径，不做 OCR、自动重试或额外检查。只有明确输入“精准文字”或“精准重绘”时，Skill 才启用更高质量和更高参考图保真度参数；这些模式可能更慢。
+
 编辑原图：
 
 Edit an original image:
