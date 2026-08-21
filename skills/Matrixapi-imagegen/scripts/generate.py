@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import re
 import sqlite3
-import struct
 import sys
 import time
 from typing import Any, Iterable
@@ -25,16 +24,15 @@ import uuid
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_BASE_URL = "https://eos.manyuvip.com"
 ALLOWED_BASE_HOST = "eos.manyuvip.com"
-# Leave the response format to the relay unless the caller explicitly selects one.
-# This preserves the original fast URL response path while still accepting b64_json.
-DEFAULT_RESPONSE_FORMAT = ""
-CONFIG_FILE = Path.home() / ".codex" / "Matrixapi-imagegen.env"
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_EDGE = 3840
 MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MAX_INPUT_IMAGES = 7
+# High-resolution edit requests can exceed the relay/upstream processing window.
+# Keep the edit request in the stable 1K-class working range while preserving
+# the requested aspect ratio. Text-only generations keep the full size limit.
 EDIT_MAX_EDGE = 1792
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
@@ -57,21 +55,6 @@ def _environment_value(name: str) -> str:
                 return value.strip()
         except (FileNotFoundError, OSError):
             pass
-    try:
-        with CONFIG_FILE.open("r", encoding="utf-8") as config:
-            for raw_line in config:
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                if key.strip() != name:
-                    continue
-                value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-                    value = value[1:-1]
-                return value.strip()
-    except (FileNotFoundError, OSError):
-        pass
     return ""
 
 
@@ -175,15 +158,6 @@ def discover_credentials() -> tuple[str, str, str, str]:
     return base_url, key, model, source
 
 
-def response_format() -> str:
-    value = _environment_value("IMAGEGEN_RESPONSE_FORMAT").lower()
-    if value not in {"", "b64_json", "url"}:
-        raise ImageGenError(
-            "IMAGEGEN_RESPONSE_FORMAT must be b64_json or url"
-        )
-    return value
-
-
 def _validate_base_url(base_url: str) -> tuple[urllib.parse.ParseResult, str]:
     try:
         parsed = urllib.parse.urlparse(base_url.strip())
@@ -208,27 +182,6 @@ def _validate_base_url(base_url: str) -> tuple[urllib.parse.ParseResult, str]:
     if port is not None:
         netloc = f"{netloc}:{port}"
     return parsed._replace(netloc=netloc), parsed.path.rstrip("/")
-
-
-class _AllowedHostRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        request: urllib.request.Request,
-        fp: Any,
-        code: int,
-        msg: str,
-        headers: Any,
-        newurl: str,
-    ) -> urllib.request.Request | None:
-        _validate_base_url(newurl)
-        return super().redirect_request(request, fp, code, msg, headers, newurl)
-
-
-_HTTP_OPENER = urllib.request.build_opener(_AllowedHostRedirectHandler)
-
-
-def _open_url(request: urllib.request.Request, timeout: int) -> Any:
-    return _HTTP_OPENER.open(request, timeout=timeout)
 
 
 def image_endpoint(base_url: str, operation: str) -> str:
@@ -276,6 +229,28 @@ def validate_size(size: str) -> str:
     return f"{width}x{height}"
 
 
+def edit_working_size(size: str) -> str:
+    """Lower an edit request to a relay-friendly size without changing its ratio."""
+    width, height = (int(value) for value in size.split("x"))
+    long_edge = max(width, height)
+    if long_edge <= EDIT_MAX_EDGE:
+        return size
+
+    scale = EDIT_MAX_EDGE / long_edge
+    working_width = max(16, int(width * scale) // 16 * 16)
+    working_height = max(16, int(height * scale) // 16 * 16)
+
+    # Rounding down can make a source ratio that was exactly 3:1 exceed the
+    # provider's ratio limit by one block; trim the long edge if necessary.
+    while max(working_width, working_height) > 3 * min(working_width, working_height):
+        if working_width >= working_height:
+            working_width -= 16
+        else:
+            working_height -= 16
+
+    return validate_size(f"{working_width}x{working_height}")
+
+
 def _read_limited(response: Any, limit: int) -> bytes:
     data = response.read(limit + 1)
     if len(data) > limit:
@@ -316,12 +291,12 @@ def _post_image_request(
             "Authorization": f"Bearer {key}",
             "Content-Type": content_type,
             "Accept": "application/json",
-            "User-Agent": "Matrixapi-imagegen-skill/1.2",
+            "User-Agent": "api-imagegen-skill/1.1",
         },
         method="POST",
     )
     try:
-        with _open_url(request, timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = _read_limited(response, MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         detail = _safe_http_detail(exc, key)
@@ -355,7 +330,6 @@ def call_api(
     count: int,
     timeout: int,
     options: dict[str, str] | None = None,
-    output_format: str = DEFAULT_RESPONSE_FORMAT,
 ) -> dict[str, Any]:
     """Call the JSON generations endpoint."""
     payload: dict[str, Any] = {
@@ -364,8 +338,6 @@ def call_api(
         "size": size,
         "n": count,
     }
-    if output_format:
-        payload["response_format"] = output_format
     if options:
         payload.update(options)
     return _post_image_request(
@@ -424,7 +396,7 @@ def _multipart_body(
     fields: Iterable[tuple[str, str]],
     files: Iterable[tuple[str, str, str, bytes]],
 ) -> tuple[bytes, str]:
-    boundary = f"----Matrixapi-imagegen-{uuid.uuid4().hex}"
+    boundary = f"----api-imagegen-{uuid.uuid4().hex}"
     chunks: list[bytes] = []
     for name, value in fields:
         chunks.append(
@@ -460,7 +432,6 @@ def call_edit_api(
     mask_path: str | None,
     timeout: int,
     options: dict[str, str] | None = None,
-    output_format: str = DEFAULT_RESPONSE_FORMAT,
 ) -> dict[str, Any]:
     if not image_paths:
         raise ImageGenError("At least one --image file is required for editing")
@@ -473,8 +444,6 @@ def call_edit_api(
         ("size", size),
         ("n", str(count)),
     ]
-    if output_format:
-        fields.append(("response_format", output_format))
     if options:
         fields.extend(options.items())
 
@@ -519,161 +488,27 @@ def _image_extension(data: bytes, content_type: str = "") -> str:
     raise ImageGenError("The API returned data that is not a supported image")
 
 
-def _jpeg_dimensions(data: bytes) -> tuple[int, int]:
-    offset = 2
-    while offset + 9 < len(data):
-        if data[offset] != 0xFF:
-            offset += 1
-            continue
-        marker = data[offset + 1]
-        offset += 2
-        if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
-            continue
-        if offset + 2 > len(data):
-            break
-        length = struct.unpack(">H", data[offset : offset + 2])[0]
-        if length < 2 or offset + length > len(data):
-            break
-        if marker in {
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC9,
-            0xCA,
-            0xCB,
-            0xCD,
-            0xCE,
-            0xCF,
-        }:
-            height, width = struct.unpack(">HH", data[offset + 3 : offset + 7])
-            return width, height
-        offset += length
-    raise ImageGenError("Unable to read the generated JPEG dimensions")
-
-
-def _image_dimensions(data: bytes, suffix: str) -> tuple[int, int]:
-    if suffix == ".png" and len(data) >= 24 and data[12:16] == b"IHDR":
-        return struct.unpack(">II", data[16:24])
-    if suffix == ".gif" and len(data) >= 10:
-        return struct.unpack("<HH", data[6:10])
-    if suffix == ".jpg":
-        return _jpeg_dimensions(data)
-    if suffix == ".webp" and len(data) >= 30:
-        chunk = data[12:16]
-        if chunk == b"VP8X":
-            width = 1 + int.from_bytes(data[24:27], "little")
-            height = 1 + int.from_bytes(data[27:30], "little")
-            return width, height
-        if chunk == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
-            bits = int.from_bytes(data[21:25], "little")
-            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
-        if chunk == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
-            width, height = struct.unpack("<HH", data[26:30])
-            return width & 0x3FFF, height & 0x3FFF
-    raise ImageGenError("Unable to read the generated image dimensions")
-
-
-def _infer_edit_size(path_value: str) -> str:
-    """Keep an edit at the source resolution when that resolution is supported."""
-    _, content_type, data = _input_image(path_value, "Input image")
-    suffix = _image_extension(data, content_type)
-    try:
-        width, height = _image_dimensions(data, suffix)
-        return edit_working_size(validate_size(f"{width}x{height}"))
-    except ImageGenError:
-        # Small, oversized, or otherwise provider-incompatible inputs use the
-        # documented fast-path size rather than causing a second API request.
-        return "1024x1024"
-
-
-def edit_working_size(size: str) -> str:
-    """Keep ordinary edits in the relay's fast working range."""
-    width, height = (int(value) for value in size.split("x"))
-    long_edge = max(width, height)
-    if long_edge <= EDIT_MAX_EDGE:
-        return size
-    scale = EDIT_MAX_EDGE / long_edge
-    working_width = max(16, int(width * scale) // 16 * 16)
-    working_height = max(16, int(height * scale) // 16 * 16)
-    while max(working_width, working_height) > 3 * min(working_width, working_height):
-        if working_width >= working_height:
-            working_width -= 16
-        else:
-            working_height -= 16
-    return validate_size(f"{working_width}x{working_height}")
-
-
-def _completion_marker(output_dir: Path, request_id: str) -> Path:
-    return output_dir / f".completed-{request_id}.json"
-
-
-def _result_file(output_dir: Path, request_id: str) -> Path:
-    return output_dir / f".result-{request_id}.json"
-
-
-def _resolution_label(width: int, height: int) -> str:
-    longest = max(width, height)
-    if longest >= 3000:
-        return "4K"
-    if longest >= 1800:
-        return "2K"
-    return "1K"
-
-
 def _decode_data_url(url: str) -> tuple[bytes, str]:
     header, encoded = url.split(",", 1)
     try:
-        return (
-            base64.b64decode(encoded.strip(), validate=True),
-            header[5:].split(";", 1)[0],
-        )
+        return base64.b64decode(encoded, validate=True), header[5:].split(";", 1)[0]
     except (binascii.Error, ValueError) as exc:
         raise ImageGenError("Image API returned invalid base64 image data") from exc
 
 
-def _decode_b64_image(value: str) -> tuple[bytes, str]:
-    """Decode raw b64_json and the data-URI variant used by some relays."""
-    value = value.strip()
-    if value.startswith("data:") and "," in value:
-        header, _ = value.split(",", 1)
-        if ";base64" not in header.lower():
-            raise ImageGenError("Image API returned invalid base64 image data")
-        return _decode_data_url(value)
-    try:
-        return base64.b64decode(value, validate=True), ""
-    except (binascii.Error, ValueError, TypeError) as exc:
-        raise ImageGenError("Image API returned invalid base64 image data") from exc
-
-
 def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[bytes, str]:
-    url = url.strip()
     if url.startswith("data:") and ";base64," in url:
         return _decode_data_url(url)
 
-    # Relative image paths are resolved against the already validated MatrixAI
-    # endpoint. Absolute URLs and redirects are still checked against the same
-    # fixed host before any network request is made.
-    url = urllib.parse.urljoin(endpoint, url)
-    try:
-        _validate_base_url(url)
-    except ImageGenError as exc:
-        raise ImageGenError(
-            "Image API returned an image URL outside the configured domain; "
-            "configure it to return b64_json or a same-domain URL"
-        ) from exc
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ImageGenError("Image API returned an unsupported image URL")
-    headers = {"User-Agent": "Matrixapi-imagegen-skill/1.2"}
+    headers = {"User-Agent": "api-imagegen-skill/1.1"}
     if _origin(url) == _origin(endpoint):
         headers["Authorization"] = f"Bearer {key}"
     request = urllib.request.Request(url, headers=headers)
     try:
-        with _open_url(request, timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "")
             return _read_limited(response, MAX_IMAGE_BYTES), content_type
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -681,24 +516,22 @@ def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[by
 
 
 def save_images(
-    result: dict[str, Any],
-    endpoint: str,
-    key: str,
-    output_dir: Path,
-    timeout: int,
-    request_id: str,
-) -> list[dict[str, Any]]:
+    result: dict[str, Any], endpoint: str, key: str, output_dir: Path, timeout: int
+) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_id = uuid.uuid4().hex[:8]
-    images: list[dict[str, Any]] = []
+    paths: list[str] = []
 
     for index, item in enumerate(result["data"], start=1):
         if not isinstance(item, dict):
             raise ImageGenError("Image API returned an invalid image item")
         content_type = ""
         if item.get("b64_json"):
-            data, content_type = _decode_b64_image(str(item["b64_json"]))
+            try:
+                data = base64.b64decode(item["b64_json"], validate=True)
+            except (binascii.Error, ValueError, TypeError) as exc:
+                raise ImageGenError("Image API returned invalid base64 image data") from exc
         elif item.get("url"):
             data, content_type = _download_image(
                 str(item["url"]), endpoint, key, timeout
@@ -709,36 +542,22 @@ def save_images(
         if not data or len(data) > MAX_IMAGE_BYTES:
             raise ImageGenError("Generated image is empty or too large")
         suffix = _image_extension(data, content_type)
-        width, height = _image_dimensions(data, suffix)
-        if width <= 0 or height <= 0:
-            raise ImageGenError("Generated image has invalid dimensions")
         final_path = output_dir / f"image-{stamp}-{run_id}-{index}{suffix}"
         temp_path = final_path.with_suffix(final_path.suffix + ".part")
         temp_path.write_bytes(data)
         temp_path.replace(final_path)
-        resolved_path = str(final_path.resolve())
-        images.append(
-            {
-                "request_id": request_id,
-                "path": resolved_path,
-                "display_path": resolved_path.replace("\\", "/"),
-                "width": width,
-                "height": height,
-                "format": suffix[1:].upper().replace("JPG", "JPEG"),
-                "resolution": _resolution_label(width, height),
-                "bytes": len(data),
-            }
-        )
-    return images
+        paths.append(str(final_path.resolve()))
+    return paths
+
+
+def preview_paths(paths: Iterable[str]) -> list[str]:
+    """Return absolute paths normalized for the chat renderer's Markdown URLs."""
+    return [Path(path).resolve().as_posix() for path in paths]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt")
-    parser.add_argument(
-        "--request-id",
-        help="Caller-owned task identifier used to bind output to this request",
-    )
     parser.add_argument(
         "--image",
         "--reference-image",
@@ -758,18 +577,13 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Request mode; auto selects edit when --image is supplied",
     )
-    parser.add_argument("--size")
+    parser.add_argument("--size", default="1024x1024")
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality")
     parser.add_argument("--background")
     parser.add_argument("--input-fidelity")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument(
-        "--allow-repeat",
-        action="store_true",
-        help="Allow an explicit retry of a completed request ID",
-    )
     parser.add_argument("--check-config", action="store_true")
     return parser.parse_args()
 
@@ -779,18 +593,12 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = parse_args()
     try:
-        request_id = (args.request_id or uuid.uuid4().hex).strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", request_id):
-            raise ImageGenError(
-                "Request ID must contain only letters, numbers, dots, underscores, or hyphens"
-            )
         if args.n < 1 or args.n > 4:
             raise ImageGenError("Image count must be between 1 and 4")
         if args.timeout < 10 or args.timeout > 600:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
-        size = validate_size(args.size or "1024x1024")
+        requested_size = validate_size(args.size)
         base_url, key, model, source = discover_credentials()
-        output_format = response_format()
         generation_url = generation_endpoint(base_url)
         edit_url = edit_endpoint(base_url)
         if args.check_config:
@@ -822,16 +630,7 @@ def main() -> int:
             raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
 
         mode = "edit" if image_paths else "generate"
-        if mode == "edit" and not args.size:
-            size = _infer_edit_size(image_paths[0])
-        output_dir = args.out_dir or (
-            Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
-        )
-        marker = _completion_marker(output_dir, request_id)
-        if marker.is_file() and not args.allow_repeat:
-            raise ImageGenError(
-                "This task ID has already completed; ask explicitly to retry before generating again"
-            )
+        size = edit_working_size(requested_size) if mode == "edit" else requested_size
         options = _option_fields(args.quality, args.background, args.input_fidelity)
         if mode == "edit":
             result = call_edit_api(
@@ -845,7 +644,6 @@ def main() -> int:
                 args.mask,
                 args.timeout,
                 options,
-                output_format,
             )
         else:
             result = call_api(
@@ -857,53 +655,43 @@ def main() -> int:
                 args.n,
                 args.timeout,
                 options,
-                output_format,
             )
-        images = save_images(
+        output_dir = args.out_dir or (
+            Path.home() / ".codex" / "generated_images" / "api-imagegen"
+        )
+        files = save_images(
             result,
             edit_url if mode == "edit" else generation_url,
             key,
             output_dir,
             args.timeout,
-            request_id,
         )
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        result_payload = {
-            "request_id": request_id,
-            "ok": True,
-            "mode": mode,
-            "model": model,
-            "count": len(images),
-            "size": size,
-            "input_images": len(image_paths),
-            "mask": bool(args.mask),
-            "files": [image["path"] for image in images],
-            "images": images,
-        }
-        # Persist the complete result before stdout. Codex can read this exact
-        # task result if its terminal bridge loses stdout after the process exits.
-        result_path = _result_file(output_dir, request_id)
-        result_temp = result_path.with_suffix(result_path.suffix + ".part")
-        result_temp.write_text(
-            json.dumps(result_payload, ensure_ascii=False), encoding="utf-8"
-        )
-        result_temp.replace(result_path)
-        marker_temp = marker.with_suffix(marker.suffix + ".part")
-        marker_temp.write_text(
-            json.dumps({"request_id": request_id, "completed": True}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        marker_temp.replace(marker)
+        preview_files = preview_paths(files)
+        download_files = preview_files.copy()
         print(
-            json.dumps(result_payload, ensure_ascii=False), flush=True
+            json.dumps(
+                {
+                    "ok": True,
+                    "mode": mode,
+                    "model": model,
+                    "count": len(files),
+                    "size": size,
+                    "requested_size": requested_size,
+                    "edit_size": size if mode == "edit" else None,
+                    "resized_for_edit": mode == "edit" and size != requested_size,
+                    "input_images": len(image_paths),
+                    "mask": bool(args.mask),
+                    "files": files,
+                    "preview_files": preview_files,
+                    "download_files": download_files,
+                },
+                ensure_ascii=False,
+            )
         )
         return 0
     except ImageGenError as exc:
         print(
-            json.dumps(
-                {"ok": False, "request_id": request_id, "error": str(exc)},
-                ensure_ascii=False,
-            ),
+            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
             file=sys.stderr,
         )
         return 1
