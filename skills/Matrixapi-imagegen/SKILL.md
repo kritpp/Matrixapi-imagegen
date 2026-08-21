@@ -15,8 +15,14 @@ conversation response concise.
   same conversation, keep using the active Skill without repeating the invocation.
 - Begin a valid image task immediately. Before the command, output only `正在生成图片…`.
   Do not narrate script reads, parameter analysis, shell commands, retries, or API details.
-- After success, display every returned file with an absolute-path Markdown image and
-  state `图片已保存至：<absolute path>`. On failure, show only the sanitized error.
+- After success, use each object in `images`; do not guess dimensions from the request.
+  First state `已生成，尺寸经检查为 WIDTH × HEIGHT，FORMAT 格式。` Then render the
+  image with `![生成图片](<DISPLAY_PATH>)`, add `[点击打开或下载 RESOLUTION 原图](<DISPLAY_PATH>)`,
+  and state `图片已保存至：PATH`. Use the exact `display_path`, `resolution`, and `path`
+  returned by the script. Keep the preview and link on separate lines.
+- Before rendering, require the script result to contain a non-empty `images` array and
+  an existing saved file. Never emit an empty image placeholder. On failure, show only
+  the sanitized error.
 - Do not claim that this external Skill can create Codex's native image-generation
   shimmer card; that UI belongs to Codex itself.
 
@@ -42,7 +48,7 @@ conversation response concise.
    ```
 
    For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
-9. Parse the JSON written to stdout. For every path in `files`, display the image with Markdown using the absolute local path, then state the saved path briefly.
+9. Parse the JSON written to stdout. For every item in `images`, show the verified dimensions and format, render the image from `display_path`, provide the corresponding 1K/2K/4K original-file link, and state the absolute `path`. The `files` array exists only for backward compatibility.
 10. If generation or editing fails, report the sanitized error. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Updating the Skill

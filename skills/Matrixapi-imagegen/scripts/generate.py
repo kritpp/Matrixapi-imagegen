@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import struct
 import sys
 import time
 from typing import Any, Iterable
@@ -499,6 +500,73 @@ def _image_extension(data: bytes, content_type: str = "") -> str:
     raise ImageGenError("The API returned data that is not a supported image")
 
 
+def _jpeg_dimensions(data: bytes) -> tuple[int, int]:
+    offset = 2
+    while offset + 9 < len(data):
+        if data[offset] != 0xFF:
+            offset += 1
+            continue
+        marker = data[offset + 1]
+        offset += 2
+        if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+            continue
+        if offset + 2 > len(data):
+            break
+        length = struct.unpack(">H", data[offset : offset + 2])[0]
+        if length < 2 or offset + length > len(data):
+            break
+        if marker in {
+            0xC0,
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
+        }:
+            height, width = struct.unpack(">HH", data[offset + 3 : offset + 7])
+            return width, height
+        offset += length
+    raise ImageGenError("Unable to read the generated JPEG dimensions")
+
+
+def _image_dimensions(data: bytes, suffix: str) -> tuple[int, int]:
+    if suffix == ".png" and len(data) >= 24 and data[12:16] == b"IHDR":
+        return struct.unpack(">II", data[16:24])
+    if suffix == ".gif" and len(data) >= 10:
+        return struct.unpack("<HH", data[6:10])
+    if suffix == ".jpg":
+        return _jpeg_dimensions(data)
+    if suffix == ".webp" and len(data) >= 30:
+        chunk = data[12:16]
+        if chunk == b"VP8X":
+            width = 1 + int.from_bytes(data[24:27], "little")
+            height = 1 + int.from_bytes(data[27:30], "little")
+            return width, height
+        if chunk == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
+            bits = int.from_bytes(data[21:25], "little")
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+        if chunk == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
+            width, height = struct.unpack("<HH", data[26:30])
+            return width & 0x3FFF, height & 0x3FFF
+    raise ImageGenError("Unable to read the generated image dimensions")
+
+
+def _resolution_label(width: int, height: int) -> str:
+    longest = max(width, height)
+    if longest >= 3000:
+        return "4K"
+    if longest >= 1800:
+        return "2K"
+    return "1K"
+
+
 def _decode_data_url(url: str) -> tuple[bytes, str]:
     header, encoded = url.split(",", 1)
     try:
@@ -529,11 +597,11 @@ def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[by
 
 def save_images(
     result: dict[str, Any], endpoint: str, key: str, output_dir: Path, timeout: int
-) -> list[str]:
+) -> list[dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_id = uuid.uuid4().hex[:8]
-    paths: list[str] = []
+    images: list[dict[str, Any]] = []
 
     for index, item in enumerate(result["data"], start=1):
         if not isinstance(item, dict):
@@ -554,12 +622,26 @@ def save_images(
         if not data or len(data) > MAX_IMAGE_BYTES:
             raise ImageGenError("Generated image is empty or too large")
         suffix = _image_extension(data, content_type)
+        width, height = _image_dimensions(data, suffix)
+        if width <= 0 or height <= 0:
+            raise ImageGenError("Generated image has invalid dimensions")
         final_path = output_dir / f"image-{stamp}-{run_id}-{index}{suffix}"
         temp_path = final_path.with_suffix(final_path.suffix + ".part")
         temp_path.write_bytes(data)
         temp_path.replace(final_path)
-        paths.append(str(final_path.resolve()))
-    return paths
+        resolved_path = str(final_path.resolve())
+        images.append(
+            {
+                "path": resolved_path,
+                "display_path": resolved_path.replace("\\", "/"),
+                "width": width,
+                "height": height,
+                "format": suffix[1:].upper().replace("JPG", "JPEG"),
+                "resolution": _resolution_label(width, height),
+                "bytes": len(data),
+            }
+        )
+    return images
 
 
 def parse_args() -> argparse.Namespace:
@@ -665,7 +747,7 @@ def main() -> int:
         output_dir = args.out_dir or (
             Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
         )
-        files = save_images(
+        images = save_images(
             result,
             edit_url if mode == "edit" else generation_url,
             key,
@@ -678,11 +760,12 @@ def main() -> int:
                     "ok": True,
                     "mode": mode,
                     "model": model,
-                    "count": len(files),
+                    "count": len(images),
                     "size": size,
                     "input_images": len(image_paths),
                     "mask": bool(args.mask),
-                    "files": files,
+                    "files": [image["path"] for image in images],
+                    "images": images,
                 },
                 ensure_ascii=False,
             )

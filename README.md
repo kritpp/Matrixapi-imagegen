@@ -26,7 +26,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 点击下面的链接即可直接从 GitHub 下载最新安装包：
 
-[**一键下载 Matrixapi-imagegen v1.1.0 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.1.0.zip)
+[**一键下载 Matrixapi-imagegen v1.1.1 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.1.1.zip)
 
 下载后解压，Windows 双击 `install-windows.bat`；macOS 双击 `install-macos.command`。
 
@@ -114,6 +114,8 @@ Natural language prompts usually trigger the Skill automatically. Explicit invoc
 Skill 会从本仓库获取最新版，替换自身文件并保留本机 API 配置。更新完成后重启 Codex；在新对话中重新调用一次 `$Matrixapi-imagegen` 即可。更新不使用系统 `$skill-installer`，因为系统安装器遇到同名目录会停止而不会覆盖。
 
 普通请求使用快速路径，不做 OCR、自动重试或额外检查。只有明确输入“精准文字”或“精准重绘”时，Skill 才启用更高质量和更高参考图保真度参数；这些模式可能更慢。
+
+生成成功后，Skill 会检查实际图片文件，并显示真实尺寸、文件格式、图片预览和本地保存路径。原图链接会按真实尺寸显示为“点击打开或下载 1K 原图”“点击打开或下载 2K 原图”或“点击打开或下载 4K 原图”。
 
 编辑原图：
 
