@@ -146,12 +146,3 @@ Current version: `1.1.7`, based on the original request flow with only the Matri
 - Generated results now inspect the actual output dimensions and PNG, JPEG, WEBP, or GIF format, then report a per-image `1K`, `2K`, or `4K` label.
 - Each preview's original-image link now includes the matching resolution label, such as “open or download 4K original”.
 
-### 1.1.2
-
-- 新增 `download_files` 输出，并要求每张预览图附带“点击打开或下载原图”链接。
-- Added `download_files` output and a clickable “open or download original image” link for every preview.
-
-### 1.1.1
-
-- 新增 `preview_files` 输出，使用适配聊天渲染器的绝对路径预览生成图片。
-- Added `preview_files` output with renderer-compatible absolute paths for generated-image previews.
