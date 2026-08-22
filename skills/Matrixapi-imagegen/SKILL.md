@@ -36,6 +36,8 @@ Generate or edit images with the bundled script and show the saved result to the
 
    Resolution labels use the output's longest edge: `4K` at 3840px or above, `2K` at 2048px or above, otherwise `1K`.
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
+
+   For a new text-to-image request (no `--image`), the current command's stdout JSON is the only source of the result. Require `ok: true`, a non-empty `preview_files` entry, and an existing file at that exact returned path before rendering. Never scan, sort, or inspect the shared generated-images directory, choose the newest or first image, or use any path from an earlier request, conversation, or Codex installation. If the current JSON is missing, invalid, or does not point to an existing file, report the generation as failed and do not display a local image. Do not trigger a retry because a directory image looks wrong or does not match the prompt; preserve the existing API-error retry policy, and use only the returned JSON from the retry that actually succeeds. This rule applies only to new text-to-image results; edits and redraws with `--image` continue to use the user-supplied input image and the current command's returned output.
 7. If generation or editing fails, report the sanitized error. If an edit was resized, include the requested size and actual edit size from the JSON fields. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Configuration
