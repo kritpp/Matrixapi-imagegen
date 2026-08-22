@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.1.6.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.1.7.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,17 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.1.6`。本版本以原作者核心请求流程为基准，仅固定 MatrixAI 图片接口并更名为 Matrixapi-imagegen。
+当前版本：`1.1.7`。本版本以原作者核心请求流程为基准，仅固定 MatrixAI 图片接口并更名为 Matrixapi-imagegen。
 
-Current version: `1.1.6`, based on the original request flow with only the MatrixAI API address and Skill naming changed.
+Current version: `1.1.7`, based on the original request flow with only the MatrixAI API address and Skill naming changed.
+
+### 1.1.7
+
+- 生成结果现在会从实际输出文件检测宽高与 PNG、JPEG、WEBP 或 GIF 格式，并为每张图片输出 `1K`、`2K` 或 `4K` 画质标签。
+- 预览下方的原图链接会显示对应画质，例如“点击打开或下载 4K 原图”。
+
+- Generated results now inspect the actual output dimensions and PNG, JPEG, WEBP, or GIF format, then report a per-image `1K`, `2K`, or `4K` label.
+- Each preview's original-image link now includes the matching resolution label, such as “open or download 4K original”.
 
 ### 1.1.2
 

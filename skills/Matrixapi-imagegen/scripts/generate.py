@@ -488,6 +488,77 @@ def _image_extension(data: bytes, content_type: str = "") -> str:
     raise ImageGenError("The API returned data that is not a supported image")
 
 
+def _image_metadata(data: bytes, content_type: str = "") -> dict[str, int | str]:
+    """Read the actual dimensions and format from a supported raster image."""
+    image_format = ""
+    width = height = 0
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        image_format = "PNG"
+        width = int.from_bytes(data[16:20], "big")
+        height = int.from_bytes(data[20:24], "big")
+    elif data.startswith((b"GIF87a", b"GIF89a")) and len(data) >= 10:
+        image_format = "GIF"
+        width = int.from_bytes(data[6:8], "little")
+        height = int.from_bytes(data[8:10], "little")
+    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        image_format = "WEBP"
+        chunk = data[12:16]
+        if chunk == b"VP8X" and len(data) >= 30:
+            width = int.from_bytes(data[24:27], "little") + 1
+            height = int.from_bytes(data[27:30], "little") + 1
+        elif chunk == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
+            width = int.from_bytes(data[26:28], "little") & 0x3FFF
+            height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        elif chunk == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
+            bits = int.from_bytes(data[21:25], "little")
+            width = (bits & 0x3FFF) + 1
+            height = ((bits >> 14) & 0x3FFF) + 1
+    elif data.startswith(b"\xff\xd8\xff"):
+        image_format = "JPEG"
+        offset = 2
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        }
+        while offset + 9 <= len(data):
+            if data[offset] != 0xFF:
+                offset += 1
+                continue
+            while offset < len(data) and data[offset] == 0xFF:
+                offset += 1
+            if offset >= len(data):
+                break
+            marker = data[offset]
+            offset += 1
+            if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+                continue
+            if offset + 2 > len(data):
+                break
+            segment_length = int.from_bytes(data[offset:offset + 2], "big")
+            if segment_length < 2 or offset + segment_length > len(data):
+                break
+            if marker in sof_markers and segment_length >= 7:
+                height = int.from_bytes(data[offset + 3:offset + 5], "big")
+                width = int.from_bytes(data[offset + 5:offset + 7], "big")
+                break
+            offset += segment_length
+
+    if not image_format:
+        _image_extension(data, content_type)
+    if width <= 0 or height <= 0:
+        raise ImageGenError("Unable to read the generated image dimensions")
+
+    longest_edge = max(width, height)
+    resolution = "4K" if longest_edge >= 3840 else "2K" if longest_edge >= 2048 else "1K"
+    return {
+        "width": width,
+        "height": height,
+        "format": image_format,
+        "resolution": resolution,
+    }
+
+
 def _decode_data_url(url: str) -> tuple[bytes, str]:
     header, encoded = url.split(",", 1)
     try:
@@ -517,11 +588,12 @@ def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[by
 
 def save_images(
     result: dict[str, Any], endpoint: str, key: str, output_dir: Path, timeout: int
-) -> list[str]:
+) -> tuple[list[str], list[dict[str, int | str]]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_id = uuid.uuid4().hex[:8]
     paths: list[str] = []
+    image_info: list[dict[str, int | str]] = []
 
     for index, item in enumerate(result["data"], start=1):
         if not isinstance(item, dict):
@@ -542,12 +614,14 @@ def save_images(
         if not data or len(data) > MAX_IMAGE_BYTES:
             raise ImageGenError("Generated image is empty or too large")
         suffix = _image_extension(data, content_type)
+        metadata = _image_metadata(data, content_type)
         final_path = output_dir / f"image-{stamp}-{run_id}-{index}{suffix}"
         temp_path = final_path.with_suffix(final_path.suffix + ".part")
         temp_path.write_bytes(data)
         temp_path.replace(final_path)
         paths.append(str(final_path.resolve()))
-    return paths
+        image_info.append(metadata)
+    return paths, image_info
 
 
 def preview_paths(paths: Iterable[str]) -> list[str]:
@@ -659,7 +733,7 @@ def main() -> int:
         output_dir = args.out_dir or (
             Path.home() / ".codex" / "generated_images" / "api-imagegen"
         )
-        files = save_images(
+        files, image_info = save_images(
             result,
             edit_url if mode == "edit" else generation_url,
             key,
@@ -684,6 +758,7 @@ def main() -> int:
                     "files": files,
                     "preview_files": preview_files,
                     "download_files": download_files,
+                    "image_info": image_info,
                 },
                 ensure_ascii=False,
             )

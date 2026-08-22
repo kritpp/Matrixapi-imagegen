@@ -26,9 +26,15 @@ Generate or edit images with the bundled script and show the saved result to the
    ```
 
    For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
-6. Parse the JSON written to stdout. For each output, render both the inline preview and a clickable original-image link, using the normalized absolute paths from `preview_files` and `download_files`:
-   `![generated image](C:/.../image.png)`
-   `[点击打开或下载原图](C:/.../image.png)`
+6. Parse the JSON written to stdout. For each output, use the matching item in `image_info` to report the actual saved image dimensions, file format, and resolution label before rendering its preview. The script determines these values from the output file itself, not from the requested size. Render both the inline preview and a clickable original-image link, using the normalized absolute paths from `preview_files` and `download_files`:
+
+   ```text
+   已生成，尺寸经检查为 3840 x 2160，PNG 格式，画质为 4K。
+   ![generated image](C:/.../image.png)
+   [点击打开或下载 4K 原图](C:/.../image.png)
+   ```
+
+   Resolution labels use the output's longest edge: `4K` at 3840px or above, `2K` at 2048px or above, otherwise `1K`.
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
 7. If generation or editing fails, report the sanitized error. If an edit was resized, include the requested size and actual edit size from the JSON fields. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
