@@ -13,16 +13,16 @@ Generate or edit images with the bundled script and show the saved result to the
 2. Turn the user's request into a complete image prompt. Preserve requested subject, composition, style, lighting, colors, text, and constraints. Do not invent identifying details. When the user supplies a local image, pass it as `--image`; pass a supplied mask as `--mask`.
 3. Choose the requested size, or use `1024x1024` when none is given. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for landscape 2K, `3840x2160` for landscape 4K, and `2160x3840` for portrait 4K. Both edges must be multiples of 16, the longest edge must not exceed 3840 pixels or three times the shorter edge, and total pixels must be between 655,360 and 8,294,400.
 4. Choose the request mode automatically: no `--image` uses `/v1/images/generations`; one or more `--image` files uses multipart `/v1/images/edits`; `--mask` is optional for edit/inpaint requests. Repeat `--image` for multiple reference images, up to seven. For edit requests above a 1792px long edge, the script automatically lowers the API edit size to a 16px-aligned equivalent ratio before sending it; text-only generation keeps the requested size. The edit response is therefore saved at the lower working size, and the original input file is never overwritten.
-5. Run a generation:
+5. Run a generation with one unique task ID for the whole user request:
 
    ```text
-   python <skill-directory>/scripts/generate.py --prompt "<prompt>" --size <WIDTHxHEIGHT> --n 1
+   python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<prompt>" --size <WIDTHxHEIGHT> --n 1
    ```
 
    For an edit with an original image:
 
    ```text
-   python <skill-directory>/scripts/generate.py --prompt "<edit instructions>" --image "<path>" --n 1
+   python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --image "<path>" --n 1
    ```
 
    For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
@@ -37,7 +37,7 @@ Generate or edit images with the bundled script and show the saved result to the
    Resolution labels use the output's longest edge: `4K` at 3840px or above, `2K` at 2048px or above, otherwise `1K`.
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
 
-   For a new text-to-image request (no `--image`), the current command's stdout JSON is the only source of the result. Require `ok: true`, a non-empty `preview_files` entry, and an existing file at that exact returned path before rendering. Never scan, sort, or inspect the shared generated-images directory, choose the newest or first image, or use any path from an earlier request, conversation, or Codex installation. If the current JSON is missing, invalid, or does not point to an existing file, report the generation as failed and do not display a local image. Do not trigger a retry because a directory image looks wrong or does not match the prompt; preserve the existing API-error retry policy, and use only the returned JSON from the retry that actually succeeds. This rule applies only to new text-to-image results; edits and redraws with `--image` continue to use the user-supplied input image and the current command's returned output.
+   For a new text-to-image request (no `--image`), require `ok: true`, a matching `request_id`, a non-empty `preview_files` entry, and an existing file at that exact returned path before rendering. The script also writes the exact sidecar `~/.codex/generated_images/api-imagegen/.result-<task-id>.json`. If the command wrapper says it is still running, keep polling that same command and read only this task's sidecar; a valid sidecar means success and must not trigger another request. Never scan, sort, or inspect the shared generated-images directory, choose the newest or first image, or use any path from an earlier request, conversation, or Codex installation. If the task has a real API/script failure, preserve the existing retry policy and use only the returned JSON from the retry that actually succeeds. This rule applies only to the current task result; edits and redraws with `--image` continue to use the current command's returned output.
 7. If generation or editing fails, report the sanitized error. If an edit was resized, include the requested size and actual edit size from the JSON fields. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Configuration

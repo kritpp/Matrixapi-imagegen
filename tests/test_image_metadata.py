@@ -1,8 +1,12 @@
 import base64
 import importlib.util
+import io
+import json
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).parents[1] / "skills" / "Matrixapi-imagegen" / "scripts" / "generate.py"
@@ -67,6 +71,36 @@ class ImageMetadataTests(unittest.TestCase):
                 image_info,
                 [{"width": 3840, "height": 2160, "format": "PNG", "resolution": "4K"}],
             )
+
+    def test_completed_request_id_blocks_a_second_api_call(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            marker = MODULE._completion_marker(output_path, "same-task")
+            marker.write_text('{"completed":true}', encoding="utf-8")
+            stderr = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "same-task",
+                "--prompt",
+                "a cat",
+                "--out-dir",
+                str(output_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+                ),
+                mock.patch.object(MODULE, "call_api") as call_api,
+                mock.patch.object(sys, "stderr", stderr),
+            ):
+                self.assertEqual(MODULE.main(), 1)
+
+            call_api.assert_not_called()
+            self.assertIn("already completed", json.loads(stderr.getvalue())["error"])
 
 
 if __name__ == "__main__":

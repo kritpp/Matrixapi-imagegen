@@ -629,6 +629,14 @@ def preview_paths(paths: Iterable[str]) -> list[str]:
     return [Path(path).resolve().as_posix() for path in paths]
 
 
+def _result_file(output_dir: Path, request_id: str) -> Path:
+    return output_dir / f".result-{request_id}.json"
+
+
+def _completion_marker(output_dir: Path, request_id: str) -> Path:
+    return output_dir / f".completed-{request_id}.json"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt")
@@ -658,6 +666,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-fidelity")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument(
+        "--request-id",
+        help="Caller-owned task identifier used to bind output to this request",
+    )
+    parser.add_argument(
+        "--allow-repeat",
+        action="store_true",
+        help="Allow an explicit retry of a completed request ID",
+    )
     parser.add_argument("--check-config", action="store_true")
     return parser.parse_args()
 
@@ -667,6 +684,11 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = parse_args()
     try:
+        request_id = (args.request_id or uuid.uuid4().hex).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", request_id):
+            raise ImageGenError(
+                "Request ID must contain only letters, numbers, dots, underscores, or hyphens"
+            )
         if args.n < 1 or args.n > 4:
             raise ImageGenError("Image count must be between 1 and 4")
         if args.timeout < 10 or args.timeout > 600:
@@ -705,6 +727,14 @@ def main() -> int:
 
         mode = "edit" if image_paths else "generate"
         size = edit_working_size(requested_size) if mode == "edit" else requested_size
+        output_dir = args.out_dir or (
+            Path.home() / ".codex" / "generated_images" / "api-imagegen"
+        )
+        completed = _completion_marker(output_dir, request_id)
+        if completed.is_file() and not args.allow_repeat:
+            raise ImageGenError(
+                "This task ID has already completed; ask explicitly to retry before generating again"
+            )
         options = _option_fields(args.quality, args.background, args.input_fidelity)
         if mode == "edit":
             result = call_edit_api(
@@ -730,9 +760,6 @@ def main() -> int:
                 args.timeout,
                 options,
             )
-        output_dir = args.out_dir or (
-            Path.home() / ".codex" / "generated_images" / "api-imagegen"
-        )
         files, image_info = save_images(
             result,
             edit_url if mode == "edit" else generation_url,
@@ -742,27 +769,36 @@ def main() -> int:
         )
         preview_files = preview_paths(files)
         download_files = preview_files.copy()
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "mode": mode,
-                    "model": model,
-                    "count": len(files),
-                    "size": size,
-                    "requested_size": requested_size,
-                    "edit_size": size if mode == "edit" else None,
-                    "resized_for_edit": mode == "edit" and size != requested_size,
-                    "input_images": len(image_paths),
-                    "mask": bool(args.mask),
-                    "files": files,
-                    "preview_files": preview_files,
-                    "download_files": download_files,
-                    "image_info": image_info,
-                },
-                ensure_ascii=False,
-            )
+        result_payload = {
+            "ok": True,
+            "request_id": request_id,
+            "mode": mode,
+            "model": model,
+            "count": len(files),
+            "size": size,
+            "requested_size": requested_size,
+            "edit_size": size if mode == "edit" else None,
+            "resized_for_edit": mode == "edit" and size != requested_size,
+            "input_images": len(image_paths),
+            "mask": bool(args.mask),
+            "files": files,
+            "preview_files": preview_files,
+            "download_files": download_files,
+            "image_info": image_info,
+        }
+        result_path = _result_file(output_dir, request_id)
+        result_temp = result_path.with_suffix(result_path.suffix + ".part")
+        result_temp.write_text(
+            json.dumps(result_payload, ensure_ascii=False), encoding="utf-8"
         )
+        result_temp.replace(result_path)
+        marker_temp = completed.with_suffix(completed.suffix + ".part")
+        marker_temp.write_text(
+            json.dumps({"request_id": request_id, "completed": True}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        marker_temp.replace(completed)
+        print(json.dumps(result_payload, ensure_ascii=False), flush=True)
         return 0
     except ImageGenError as exc:
         print(
