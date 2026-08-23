@@ -134,7 +134,7 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.5`。本版本将成功 JSON 作为唯一最终结果，渲染后立即结束任务，避免图片已返回后继续触发确认和收尾响应；同时保留参考图上限 15 张、任务 ID 防重和旧图隔离。
+当前版本：`1.2.6`。本版本包含 v1.2.5 的快速完成修复，并补齐 ZIP 根目录的 Windows/macOS 自动安装脚本；同时保留参考图上限 15 张、任务 ID 防重和旧图隔离。
 
 Current version: `1.2.5`, treating one validated success JSON as the final result and ending the task immediately after rendering while retaining up to 15 reference images, task-ID deduplication, and old-image isolation.
 
