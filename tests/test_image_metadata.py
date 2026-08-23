@@ -18,6 +18,10 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ImageMetadataTests(unittest.TestCase):
+    def test_edit_size_preserves_requested_1k_2k_and_4k(self):
+        for size in ("1024x1024", "2048x2048", "3840x2160"):
+            self.assertEqual(MODULE.edit_working_size(size), size)
+
     def test_png_4k_metadata(self):
         data = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + (3840).to_bytes(4, "big") + (2160).to_bytes(4, "big")
         self.assertEqual(

@@ -30,10 +30,6 @@ MAX_EDGE = 3840
 MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MAX_INPUT_IMAGES = 7
-# High-resolution edit requests can exceed the relay/upstream processing window.
-# Keep the edit request in the stable 1K-class working range while preserving
-# the requested aspect ratio. Text-only generations keep the full size limit.
-EDIT_MAX_EDGE = 1792
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 
@@ -230,25 +226,8 @@ def validate_size(size: str) -> str:
 
 
 def edit_working_size(size: str) -> str:
-    """Lower an edit request to a relay-friendly size without changing its ratio."""
-    width, height = (int(value) for value in size.split("x"))
-    long_edge = max(width, height)
-    if long_edge <= EDIT_MAX_EDGE:
-        return size
-
-    scale = EDIT_MAX_EDGE / long_edge
-    working_width = max(16, int(width * scale) // 16 * 16)
-    working_height = max(16, int(height * scale) // 16 * 16)
-
-    # Rounding down can make a source ratio that was exactly 3:1 exceed the
-    # provider's ratio limit by one block; trim the long edge if necessary.
-    while max(working_width, working_height) > 3 * min(working_width, working_height):
-        if working_width >= working_height:
-            working_width -= 16
-        else:
-            working_height -= 16
-
-    return validate_size(f"{working_width}x{working_height}")
+    """Preserve the requested edit size; the provider decides its own limits."""
+    return validate_size(size)
 
 
 def _read_limited(response: Any, limit: int) -> bytes:

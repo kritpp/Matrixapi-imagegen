@@ -10,21 +10,21 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 上传一张或多张参考图进行编辑：`POST /v1/images/edits`
 - 使用 PNG 蒙版进行局部重绘
 - 自动选择生成或编辑模式，并保存结果到本机
-- 高分辨率编辑自动按比例降到稳定的编辑尺寸，避免中转站高分辨率超时
+- 编辑请求保留用户指定的 1K、2K 或 4K 尺寸，由上游接口决定是否支持
 - 支持 PNG、JPEG、WEBP、GIF 输入；最多 7 张输入图，最多 4 个结果
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
 - Masked local repainting with a PNG mask
 - Automatic generate/edit mode selection and local result saving
-- High-resolution edits automatically use a proportional lower working size to avoid relay timeouts
+- Edit requests preserve the requested 1K, 2K, or 4K size; the provider decides whether it is supported
 - PNG, JPEG, WEBP, and GIF inputs; up to 7 input images and 4 outputs
 
 ## 安装 Install
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.0.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.1.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -92,9 +92,9 @@ Edit an original image:
 使用 $Matrixapi-imagegen 修改我上传的图片：只把天空改成日落，保持主体、构图和其他区域不变。
 ```
 
-对于高分辨率编辑，Skill 会自动降低本次 API 编辑尺寸并保持宽高比；原图不会被覆盖。返回 JSON 会同时给出 `requested_size`、`edit_size` 和 `resized_for_edit`。
+编辑请求会按用户指定尺寸发送，包括 1K、2K 和 4K；如果上游不支持该尺寸，Skill 会返回上游错误，不会静默降低画质。原图不会被覆盖。返回 JSON 会同时给出 `requested_size`、`edit_size` 和 `resized_for_edit`。
 
-For high-resolution edits, the Skill automatically lowers the API working size while preserving aspect ratio. The original file is never overwritten. JSON output includes `requested_size`, `edit_size`, and `resized_for_edit`.
+Edit requests are sent at the requested size, including 1K, 2K, and 4K. If the provider does not support that size, the Skill reports the provider error instead of silently reducing quality. The original file is never overwritten. JSON output includes `requested_size`, `edit_size`, and `resized_for_edit`.
 
 蒙版局部重绘：
 
@@ -134,9 +134,14 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.0`。本版本以原作者核心请求流程为基准，增强当前任务结果回传与重复请求保护，并在 Windows 中隐藏任务状态文件。
+当前版本：`1.2.1`。本版本保留编辑请求的原始尺寸，不再静默降低 2K/4K 编辑画质。
 
-Current version: `1.2.0`, based on the original request flow with stronger current-task result delivery, duplicate-request protection, and hidden Windows task sidecars.
+Current version: `1.2.1`, preserving the requested edit size instead of silently reducing 2K/4K edit quality.
+
+### 1.2.1
+
+- 编辑请求不再自动降到 1792px；1K、2K、4K 按请求尺寸发送，上游不支持时明确返回错误。
+- Edit requests no longer shrink to 1792px; requested 1K, 2K, and 4K sizes are sent unchanged, with an explicit provider error when unsupported.
 
 ### 1.2.0
 
