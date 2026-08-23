@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.6.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.7.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,7 +134,7 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.6`。本版本包含 v1.2.5 的快速完成修复，并补齐 ZIP 根目录的 Windows/macOS 自动安装脚本；同时保留参考图上限 15 张、任务 ID 防重和旧图隔离。
+当前版本：`1.2.7`。本版本在保存图片后优先输出成功 JSON；隐藏 JSON 或写入任务标记失败时也不会抑制成功结果，避免 Codex 因未捕获结果而重复生图；同时保留 v1.2.6 的根目录自动安装脚本、参考图上限 15 张、任务 ID 防重和旧图隔离。
 
 Current version: `1.2.5`, treating one validated success JSON as the final result and ending the task immediately after rendering while retaining up to 15 reference images, task-ID deduplication, and old-image isolation.
 

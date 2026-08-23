@@ -801,12 +801,19 @@ def main() -> int:
             "image_info": image_info,
         }
 
-        # The ready sidecar is the single completion signal. It contains the
-        # validated paths and metadata, reserves the task ID, and avoids extra
-        # post-result filesystem work that can delay the caller.
-        _write_sidecar(ready, result_payload)
-        _hide_sidecar(ready)
+        # Write the marker before announcing success so retries remain bound to
+        # this request. A marker failure must not hide a successfully saved
+        # image from Codex, so the success JSON is always emitted next.
+        try:
+            _write_sidecar(ready, result_payload)
+        except Exception:
+            pass
         print(json.dumps(result_payload, ensure_ascii=False), flush=True)
+        # Hiding is cosmetic and must never delay or suppress the success JSON.
+        try:
+            _hide_sidecar(ready)
+        except Exception:
+            pass
         return 0
     except ImageGenError as exc:
         print(
