@@ -29,7 +29,7 @@ MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_EDGE = 3840
 MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
-MAX_INPUT_IMAGES = 7
+MAX_INPUT_IMAGES = 15
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 
 

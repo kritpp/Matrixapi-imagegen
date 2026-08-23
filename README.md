@@ -11,20 +11,20 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 使用 PNG 蒙版进行局部重绘
 - 自动选择生成或编辑模式，并保存结果到本机
 - 编辑请求保留用户指定的 1K、2K 或 4K 尺寸，由上游接口决定是否支持
-- 支持 PNG、JPEG、WEBP、GIF 输入；最多 7 张输入图，最多 4 个结果
+- 支持 PNG、JPEG、WEBP、GIF 输入；最多 15 张输入图，最多 4 个结果
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
 - Masked local repainting with a PNG mask
 - Automatic generate/edit mode selection and local result saving
 - Edit requests preserve the requested 1K, 2K, or 4K size; the provider decides whether it is supported
-- PNG, JPEG, WEBP, and GIF inputs; up to 7 input images and 4 outputs
+- PNG, JPEG, WEBP, and GIF inputs; up to 15 input images and 4 outputs
 
 ## 安装 Install
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.2.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.3.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -130,13 +130,18 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 更新 Update
 
-安装完成后，在 Codex 中输入 `更新 Matrixapi-imagegen`，Skill 会从本仓库获取最新版本并自动替换本地同名 Skill，API Key 保留在本机。更新完成后重启 Codex；新建对话时重新输入一次 `$Matrixapi-imagegen`。
+安装完成后，在 Codex 中输入 `更新 Matrixapi-imagegen`，Skill 会下载本仓库的最新版发布包并自动替换本地同名 Skill，API Key 保留在本机。更新器带有互斥锁和有限重试，更新完成后重启 Codex；新建对话时重新输入一次 `$Matrixapi-imagegen`。
 
 ## 发布版本 Release
 
-当前版本：`1.2.2`。本版本在图片下载和尺寸校验完成后立即发布当前任务结果，减少 Codex 等待命令收尾的时间；同时保留任务 ID 防重和旧图隔离。
+当前版本：`1.2.3`。本版本将参考图上限提高到 15 张；同时保留图片下载完成即发布、任务 ID 防重和旧图隔离。
 
-Current version: `1.2.2`, publishing the current task result as soon as image download and dimension validation finish while retaining task-ID deduplication and old-image isolation.
+Current version: `1.2.3`, supporting up to 15 reference images while retaining immediate result publication, task-ID deduplication, and old-image isolation.
+
+### 1.2.3
+
+- 参考图上限从 7 张提高到 15 张。
+- Reference-image limit increased from 7 to 15.
 
 ### 1.2.2
 

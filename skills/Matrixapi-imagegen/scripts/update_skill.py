@@ -8,16 +8,21 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
 import zipfile
 
 
-REPOSITORY_ARCHIVE = (
-    "https://github.com/kritpp/Matrixapi-imagegen/archive/refs/heads/main.zip"
+REPOSITORY_CONTENTS_API = (
+    "https://api.github.com/repos/kritpp/Matrixapi-imagegen/contents"
+)
+PACKAGE_NAME_PATTERN = re.compile(
+    r"^Matrixapi-imagegen-v(\d+)\.(\d+)\.(\d+)\.zip$"
 )
 MAX_ARCHIVE_BYTES = 40 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 120 * 1024 * 1024
@@ -34,6 +39,35 @@ class UpdateError(RuntimeError):
     pass
 
 
+def _resolve_archive_url() -> str:
+    request = urllib.request.Request(
+        REPOSITORY_CONTENTS_API,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "Matrixapi-imagegen-updater/1.0"},
+    )
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = response.read(1024 * 1024 + 1)
+            if len(payload) > 1024 * 1024:
+                raise UpdateError("The GitHub package listing is unexpectedly large")
+            listing = json.loads(payload)
+            candidates: list[tuple[tuple[int, int, int], str]] = []
+            for item in listing:
+                match = PACKAGE_NAME_PATTERN.fullmatch(str(item.get("name", "")))
+                download_url = str(item.get("download_url", ""))
+                if match and download_url.startswith("https://"):
+                    candidates.append((tuple(map(int, match.groups())), download_url))
+            if not candidates:
+                raise UpdateError("The GitHub repository does not contain a release package")
+            return max(candidates)[1]
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1 << attempt)
+    raise UpdateError(f"Unable to find the latest Skill after 3 attempts: {last_error}") from last_error
+
+
 def _safe_member_path(name: str) -> tuple[str, ...]:
     normalized = name.replace("\\", "/").strip("/")
     parts = tuple(part for part in normalized.split("/") if part)
@@ -47,11 +81,18 @@ def _download_archive(url: str) -> bytes:
         url,
         headers={"Accept": "application/zip", "User-Agent": "Matrixapi-imagegen-updater/1.0"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = response.read(MAX_ARCHIVE_BYTES + 1)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise UpdateError(f"Unable to download the latest Skill: {exc}") from exc
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = response.read(MAX_ARCHIVE_BYTES + 1)
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1 << attempt)
+    else:
+        raise UpdateError(f"Unable to download the latest Skill after 3 attempts: {last_error}") from last_error
     if len(data) > MAX_ARCHIVE_BYTES:
         raise UpdateError("The update archive is larger than the local safety limit")
     return data
@@ -132,19 +173,42 @@ def _replace_skill(target: Path, staged: Path) -> None:
 
 
 def update_skill(archive_url: str, target: Path) -> None:
-    archive_data = _download_archive(archive_url)
-    with tempfile.TemporaryDirectory(
-        prefix=".matrixapi-imagegen-update-", dir=str(target.parent)
-    ) as temp_dir:
-        staged = Path(temp_dir) / target.name
-        staged.mkdir()
-        _extract_skill(archive_data, staged)
-        _replace_skill(target, staged)
+    lock_path = target.parent / f".{target.name}.update.lock"
+    try:
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        try:
+            stale = time.time() - lock_path.stat().st_mtime > 1800
+        except OSError:
+            stale = False
+        if not stale:
+            raise UpdateError("Another Skill update is already in progress") from exc
+        try:
+            lock_path.unlink()
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError as retry_error:
+            raise UpdateError("Another Skill update is already in progress") from retry_error
+    try:
+        with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_file:
+            lock_file.write(str(os.getpid()))
+        archive_data = _download_archive(archive_url or _resolve_archive_url())
+        with tempfile.TemporaryDirectory(
+            prefix=".matrixapi-imagegen-update-", dir=str(target.parent)
+        ) as temp_dir:
+            staged = Path(temp_dir) / target.name
+            staged.mkdir()
+            _extract_skill(archive_data, staged)
+            _replace_skill(target, staged)
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--archive-url", default=REPOSITORY_ARCHIVE, help=argparse.SUPPRESS)
+    parser.add_argument("--archive-url", default="", help=argparse.SUPPRESS)
     parser.add_argument("--target", type=Path, help=argparse.SUPPRESS)
     return parser.parse_args()
 
