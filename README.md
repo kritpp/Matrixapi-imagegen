@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.4.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.5.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,16 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.4`。本版本将成功结果收敛为单一 ready 信号，输出成功 JSON 后立即结束命令；同时保留参考图上限 15 张、任务 ID 防重和旧图隔离。
+当前版本：`1.2.5`。本版本将成功 JSON 作为唯一最终结果，渲染后立即结束任务，避免图片已返回后继续触发确认和收尾响应；同时保留参考图上限 15 张、任务 ID 防重和旧图隔离。
 
-Current version: `1.2.4`, using one ready signal and exiting immediately after a validated success JSON while retaining up to 15 reference images, task-ID deduplication, and old-image isolation.
+Current version: `1.2.5`, treating one validated success JSON as the final result and ending the task immediately after rendering while retaining up to 15 reference images, task-ID deduplication, and old-image isolation.
+
+### 1.2.5
+
+- 成功 JSON 现在明确是最终结果；Codex 渲染后立即结束，不再发起额外确认、目录扫描、尺寸复核或收尾请求。
+- 保留 `request_id`、精确 `preview_files` 路径和 ready 标记，继续防止旧图和重复生图。
+- The success JSON is explicitly the final result; Codex renders it immediately without follow-up confirmation, directory scans, dimension rechecks, or cleanup requests.
+- `request_id`, exact `preview_files` paths, and the ready marker remain in place to prevent stale images and duplicate generation.
 
 ### 1.2.4
 
