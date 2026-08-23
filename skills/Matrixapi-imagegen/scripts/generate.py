@@ -637,6 +637,28 @@ def _completion_marker(output_dir: Path, request_id: str) -> Path:
     return output_dir / f".completed-{request_id}.json"
 
 
+def _hide_sidecar(path: Path) -> None:
+    """Hide task sidecars in Windows Explorer without changing their paths."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        get_attributes = ctypes.windll.kernel32.GetFileAttributesW
+        set_attributes = ctypes.windll.kernel32.SetFileAttributesW
+        get_attributes.argtypes = [ctypes.c_wchar_p]
+        get_attributes.restype = ctypes.c_uint32
+        set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        set_attributes.restype = ctypes.c_int
+        attributes = get_attributes(str(path))
+        if attributes == 0xFFFFFFFF:
+            return
+        set_attributes(str(path), attributes | 0x2)
+    except (AttributeError, OSError):
+        # The sidecar remains usable if the platform cannot set Explorer flags.
+        return
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt")
@@ -792,12 +814,14 @@ def main() -> int:
             json.dumps(result_payload, ensure_ascii=False), encoding="utf-8"
         )
         result_temp.replace(result_path)
+        _hide_sidecar(result_path)
         marker_temp = completed.with_suffix(completed.suffix + ".part")
         marker_temp.write_text(
             json.dumps({"request_id": request_id, "completed": True}, ensure_ascii=False),
             encoding="utf-8",
         )
         marker_temp.replace(completed)
+        _hide_sidecar(completed)
         print(json.dumps(result_payload, ensure_ascii=False), flush=True)
         return 0
     except ImageGenError as exc:

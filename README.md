@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.1.9.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.0.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,14 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.1.9`。本版本以原作者核心请求流程为基准，增强当前任务结果回传与重复请求保护。
+当前版本：`1.2.0`。本版本以原作者核心请求流程为基准，增强当前任务结果回传与重复请求保护，并在 Windows 中隐藏任务状态文件。
 
-Current version: `1.1.9`, based on the original request flow with stronger current-task result delivery and duplicate-request protection.
+Current version: `1.2.0`, based on the original request flow with stronger current-task result delivery, duplicate-request protection, and hidden Windows task sidecars.
+
+### 1.2.0
+
+- Windows 会自动隐藏 `.result-*.json` 和 `.completed-*.json` 状态文件；文件仍保留在原路径，Codex 可正常读取。
+- Windows automatically hides `.result-*.json` and `.completed-*.json` task sidecars while keeping them at the same readable paths.
 
 ### 1.1.9
 

@@ -2,6 +2,7 @@ import base64
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -101,6 +102,19 @@ class ImageMetadataTests(unittest.TestCase):
 
             call_api.assert_not_called()
             self.assertIn("already completed", json.loads(stderr.getvalue())["error"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows Explorer attributes are platform-specific")
+    def test_sidecar_is_hidden_without_changing_its_path(self):
+        with TemporaryDirectory() as output_dir:
+            sidecar = Path(output_dir) / ".result-task.json"
+            sidecar.write_text("{}", encoding="utf-8")
+            MODULE._hide_sidecar(sidecar)
+            self.assertTrue(sidecar.is_file())
+            import ctypes
+
+            attributes = ctypes.windll.kernel32.GetFileAttributesW(str(sidecar))
+            self.assertNotEqual(attributes, 0xFFFFFFFF)
+            self.assertTrue(attributes & 0x2)
 
 
 if __name__ == "__main__":
