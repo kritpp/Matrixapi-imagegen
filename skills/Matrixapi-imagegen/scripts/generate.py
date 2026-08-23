@@ -801,19 +801,11 @@ def main() -> int:
             "image_info": image_info,
         }
 
-        # Publish the validated current-task result before final bookkeeping so
-        # the caller can render it while a slow command wrapper is still closing.
+        # The ready sidecar is the single completion signal. It contains the
+        # validated paths and metadata, reserves the task ID, and avoids extra
+        # post-result filesystem work that can delay the caller.
         _write_sidecar(ready, result_payload)
         _hide_sidecar(ready)
-
-        result_path = _result_file(output_dir, request_id)
-        _write_sidecar(result_path, result_payload)
-        _hide_sidecar(result_path)
-        _write_sidecar(
-            completed,
-            {"request_id": request_id, "completed": True},
-        )
-        _hide_sidecar(completed)
         print(json.dumps(result_payload, ensure_ascii=False), flush=True)
         return 0
     except ImageGenError as exc:

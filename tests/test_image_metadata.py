@@ -107,6 +107,47 @@ class ImageMetadataTests(unittest.TestCase):
             call_api.assert_not_called()
             self.assertIn("already completed", json.loads(stderr.getvalue())["error"])
 
+    def test_success_publishes_one_ready_sidecar_without_cleanup_markers(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            image_path = output_path / "image-current.png"
+            image_path.write_bytes(b"validated image")
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "ready-task",
+                "--prompt",
+                "a cat",
+                "--out-dir",
+                str(output_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+                ),
+                mock.patch.object(MODULE, "call_api", return_value={"data": [{}]}),
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    return_value=([str(image_path)], [{"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}]),
+                ),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            payload = json.loads(stdout.getvalue())
+            self.assertTrue(payload["ok"])
+            self.assertEqual(
+                json.loads((output_path / ".ready-ready-task.json").read_text(encoding="utf-8")),
+                payload,
+            )
+            self.assertFalse((output_path / ".result-ready-task.json").exists())
+            self.assertFalse((output_path / ".completed-ready-task.json").exists())
+
     @unittest.skipUnless(os.name == "nt", "Windows Explorer attributes are platform-specific")
     def test_sidecar_is_hidden_without_changing_its_path(self):
         with TemporaryDirectory() as output_dir:
