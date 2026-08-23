@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.1.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.2.zip`，解压后双击 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,18 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.1`。本版本保留编辑请求的原始尺寸，不再静默降低 2K/4K 编辑画质。
+当前版本：`1.2.2`。本版本在图片下载和尺寸校验完成后立即发布当前任务结果，减少 Codex 等待命令收尾的时间；同时保留任务 ID 防重和旧图隔离。
 
-Current version: `1.2.1`, preserving the requested edit size instead of silently reducing 2K/4K edit quality.
+Current version: `1.2.2`, publishing the current task result as soon as image download and dimension validation finish while retaining task-ID deduplication and old-image isolation.
+
+### 1.2.2
+
+- 图片文件和尺寸校验完成后立即写入 `.ready-<task-id>.json`，Codex 可直接读取并显示当前任务图片，不必等待命令包装器退出。
+- `.ready-*.json`、`.result-*.json` 和 `.completed-*.json` 均会在 Windows 资源管理器中隐藏，但仍保留原路径和可读性。
+- Ready 标记同时锁定任务 ID，避免命令收尾较慢时重复提交生图请求。
+- After the image file and dimensions are validated, `.ready-<task-id>.json` is written immediately so Codex can render the current task without waiting for wrapper cleanup.
+- `.ready-*.json`, `.result-*.json`, and `.completed-*.json` are hidden in Windows Explorer while remaining readable at their original paths.
+- The ready marker also reserves the task ID, preventing duplicate image requests while command cleanup is still running.
 
 ### 1.2.1
 

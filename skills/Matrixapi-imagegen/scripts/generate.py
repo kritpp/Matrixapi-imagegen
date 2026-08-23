@@ -616,6 +616,18 @@ def _completion_marker(output_dir: Path, request_id: str) -> Path:
     return output_dir / f".completed-{request_id}.json"
 
 
+def _ready_marker(output_dir: Path, request_id: str) -> Path:
+    return output_dir / f".ready-{request_id}.json"
+
+
+def _write_sidecar(path: Path, payload: dict[str, Any]) -> None:
+    temp_path = path.with_suffix(path.suffix + ".part")
+    temp_path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    temp_path.replace(path)
+
+
 def _hide_sidecar(path: Path) -> None:
     """Hide task sidecars in Windows Explorer without changing their paths."""
     if os.name != "nt":
@@ -732,7 +744,8 @@ def main() -> int:
             Path.home() / ".codex" / "generated_images" / "api-imagegen"
         )
         completed = _completion_marker(output_dir, request_id)
-        if completed.is_file() and not args.allow_repeat:
+        ready = _ready_marker(output_dir, request_id)
+        if (completed.is_file() or ready.is_file()) and not args.allow_repeat:
             raise ImageGenError(
                 "This task ID has already completed; ask explicitly to retry before generating again"
             )
@@ -787,19 +800,19 @@ def main() -> int:
             "download_files": download_files,
             "image_info": image_info,
         }
+
+        # Publish the validated current-task result before final bookkeeping so
+        # the caller can render it while a slow command wrapper is still closing.
+        _write_sidecar(ready, result_payload)
+        _hide_sidecar(ready)
+
         result_path = _result_file(output_dir, request_id)
-        result_temp = result_path.with_suffix(result_path.suffix + ".part")
-        result_temp.write_text(
-            json.dumps(result_payload, ensure_ascii=False), encoding="utf-8"
-        )
-        result_temp.replace(result_path)
+        _write_sidecar(result_path, result_payload)
         _hide_sidecar(result_path)
-        marker_temp = completed.with_suffix(completed.suffix + ".part")
-        marker_temp.write_text(
-            json.dumps({"request_id": request_id, "completed": True}, ensure_ascii=False),
-            encoding="utf-8",
+        _write_sidecar(
+            completed,
+            {"request_id": request_id, "completed": True},
         )
-        marker_temp.replace(completed)
         _hide_sidecar(completed)
         print(json.dumps(result_payload, ensure_ascii=False), flush=True)
         return 0
