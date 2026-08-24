@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.8.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.9.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,22 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.8`。本版本会在图片请求开始前锁定任务；当命令仍在运行时，Codex 只继续等待同一进程，不能把暂时没有 JSON 误判为失败。即使发生同任务重叠调用，后一个进程也只复用第一次的结果，不会再次请求图片接口。图片保存后仍立即输出成功 JSON，不增加目录扫描或额外收尾检查。
+当前版本：`1.2.9`。本版本按实际执行批次绑定结果：只有在首个命令仍运行时已经重叠启动的同任务进程，才能复用该批次的结果；首个命令退出后的任何新执行都会重新生成，即使任务 ID 相同，也不会展示旧图。自动更新器同时兼容合法的 `./` ZIP 路径。图片保存后仍立即输出成功 JSON，不增加目录扫描或额外收尾检查。
 
-Current version: `1.2.8`, keeping one command session active until its real completion and reusing the first result if the same task is invoked concurrently, without adding image API calls or post-success scans.
+Current version: `1.2.9`. Results are bound to the active execution: only a process that overlaps the still-running original task can reuse its exact result. Any later invocation generates a new image even when the task ID is reused. The updater also accepts legitimate ZIP entries beginning with `./`, without adding image API calls or post-success scans.
+
+### 1.2.9
+
+- ready 结果新增唯一执行标识，旧时间段留下的同任务 ID 结果不再被复用。
+- 仅同一首个命令仍在运行期间发生的重叠调用可复用结果，继续防止重复调用和计费。
+- 图片保存后立即输出 JSON，随后才隐藏记录文件；不增加目录扫描、指纹计算或额外命令。
+- 自动更新器接受 ZIP 中合法的 `./` 开头路径，并继续拒绝绝对路径和目录穿越路径。
+- Windows 与 macOS 根目录自动安装脚本继续包含在压缩包内。
+- Ready results now carry a unique execution ID, so a later run cannot reuse an old result with the same task ID.
+- Only invocations overlapping the still-active original process may reuse its result.
+- Success JSON is emitted immediately after saving and before cosmetic hiding, with no scans, fingerprints, or extra commands.
+- The updater accepts legitimate `./` ZIP paths while still rejecting absolute paths and traversal.
+- Root-level Windows and macOS installers remain included.
 
 ### 1.2.8
 

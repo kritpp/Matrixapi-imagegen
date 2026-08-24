@@ -31,7 +31,7 @@ MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MAX_INPUT_IMAGES = 15
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-SKILL_VERSION = "1.2.8"
+SKILL_VERSION = "1.2.9"
 
 
 class ImageGenError(RuntimeError):
@@ -655,7 +655,9 @@ def _hide_sidecar(path: Path) -> None:
         return
 
 
-def _load_ready_result(path: Path, request_id: str) -> dict[str, Any]:
+def _load_ready_result(
+    path: Path, request_id: str, execution_id: str
+) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -665,6 +667,7 @@ def _load_ready_result(path: Path, request_id: str) -> dict[str, Any]:
         not isinstance(payload, dict)
         or payload.get("ok") is not True
         or payload.get("request_id") != request_id
+        or payload.get("execution_id") != execution_id
         or not isinstance(preview_files, list)
         or not preview_files
         or any(not isinstance(path_value, str) or not Path(path_value).is_file() for path_value in preview_files)
@@ -673,12 +676,22 @@ def _load_ready_result(path: Path, request_id: str) -> dict[str, Any]:
     return payload
 
 
-def _running_marker_expired(path: Path) -> bool:
+def _load_running_execution(
+    path: Path, request_id: str
+) -> tuple[str, float] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return float(payload["expires_at"]) <= time.time()
+        execution_id = payload["execution_id"]
+        expires_at = float(payload["expires_at"])
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return False
+        return None
+    if (
+        payload.get("request_id") != request_id
+        or not isinstance(execution_id, str)
+        or not execution_id
+    ):
+        return None
+    return execution_id, expires_at
 
 
 def _reserve_request(
@@ -686,33 +699,47 @@ def _reserve_request(
     request_id: str,
     allow_repeat: bool,
     timeout: int,
-) -> tuple[Path | None, dict[str, Any] | None]:
+) -> tuple[Path | None, str, dict[str, Any] | None]:
     """Reserve a task before the API call and reuse an overlapping task's result."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    completed = _completion_marker(output_dir, request_id)
     ready = _ready_marker(output_dir, request_id)
     running = _running_marker(output_dir, request_id)
     reservation_seconds = timeout * 2 + 60
     deadline = time.monotonic() + reservation_seconds
-    waited_for_running = False
+    observed_execution_id = ""
 
     while True:
-        if ready.is_file() and (not allow_repeat or waited_for_running):
-            return None, _load_ready_result(ready, request_id)
-        if not allow_repeat and completed.is_file():
+        if observed_execution_id and ready.is_file():
+            try:
+                result = _load_ready_result(
+                    ready, request_id, observed_execution_id
+                )
+            except ImageGenError:
+                result = None
+            if result is not None:
+                return None, observed_execution_id, result
+
+        # A ready file from an earlier execution never reserves the task ID.
+        # Only a process that observed the currently active running marker may
+        # reuse that execution's exact result.
+        if observed_execution_id and not running.exists():
             raise ImageGenError(
-                "This task ID has already completed; ask explicitly to retry before generating again"
+                "The overlapping image request ended without a usable result"
             )
+
+        execution_id = uuid.uuid4().hex
         try:
             descriptor = os.open(running, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
-            waited_for_running = True
-            if _running_marker_expired(running):
+            active = _load_running_execution(running, request_id)
+            if active is not None and active[1] <= time.time():
                 try:
                     running.unlink()
                 except FileNotFoundError:
                     pass
                 continue
+            if active is not None:
+                observed_execution_id = active[0]
             if time.monotonic() >= deadline:
                 raise ImageGenError(
                     "This task ID is still running; continue waiting for the original command"
@@ -724,6 +751,7 @@ def _reserve_request(
             json.dump(
                 {
                     "request_id": request_id,
+                    "execution_id": execution_id,
                     "skill_version": SKILL_VERSION,
                     "expires_at": time.time() + reservation_seconds,
                 },
@@ -733,7 +761,7 @@ def _reserve_request(
             _hide_sidecar(running)
         except Exception:
             pass
-        return running, None
+        return running, execution_id, None
 
 
 def _release_request(running: Path) -> None:
@@ -838,7 +866,7 @@ def main() -> int:
             Path.home() / ".codex" / "generated_images" / "api-imagegen"
         )
         ready = _ready_marker(output_dir, request_id)
-        running, existing_result = _reserve_request(
+        running, execution_id, existing_result = _reserve_request(
             output_dir, request_id, args.allow_repeat, args.timeout
         )
         if existing_result is not None:
@@ -881,6 +909,7 @@ def main() -> int:
         result_payload = {
             "ok": True,
             "request_id": request_id,
+            "execution_id": execution_id,
             "mode": mode,
             "model": model,
             "skill_version": SKILL_VERSION,

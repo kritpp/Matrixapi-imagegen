@@ -77,12 +77,23 @@ class ImageMetadataTests(unittest.TestCase):
                 [{"width": 3840, "height": 2160, "format": "PNG", "resolution": "4K"}],
             )
 
-    def test_completed_request_id_blocks_a_second_api_call(self):
+    def test_old_ready_result_never_blocks_a_new_execution(self):
         with TemporaryDirectory() as output_dir:
             output_path = Path(output_dir)
-            marker = MODULE._completion_marker(output_path, "same-task")
-            marker.write_text('{"completed":true}', encoding="utf-8")
-            stderr = io.StringIO()
+            old_image = output_path / "image-old.png"
+            old_image.write_bytes(b"old image")
+            MODULE._write_sidecar(
+                MODULE._ready_marker(output_path, "same-task"),
+                {
+                    "ok": True,
+                    "request_id": "same-task",
+                    "execution_id": "old-execution",
+                    "preview_files": [old_image.resolve().as_posix()],
+                },
+            )
+            new_image = output_path / "image-new.png"
+            new_image.write_bytes(b"new image")
+            stdout = io.StringIO()
             argv = [
                 "generate.py",
                 "--request-id",
@@ -99,20 +110,25 @@ class ImageMetadataTests(unittest.TestCase):
                     "discover_credentials",
                     return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
                 ),
-                mock.patch.object(MODULE, "call_api") as call_api,
-                mock.patch.object(sys, "stderr", stderr),
+                mock.patch.object(MODULE, "call_api", return_value={"data": [{}]}) as call_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    return_value=([str(new_image)], [{"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}]),
+                ),
+                mock.patch.object(sys, "stdout", stdout),
             ):
-                self.assertEqual(MODULE.main(), 1)
+                self.assertEqual(MODULE.main(), 0)
 
-            call_api.assert_not_called()
-            self.assertIn("already completed", json.loads(stderr.getvalue())["error"])
+            call_api.assert_called_once()
+            self.assertEqual(json.loads(stdout.getvalue())["preview_files"], [new_image.resolve().as_posix()])
 
     def test_overlapping_request_reuses_first_result(self):
         with TemporaryDirectory() as output_dir:
             output_path = Path(output_dir)
             image_path = output_path / "image-current.png"
             image_path.write_bytes(b"validated image")
-            first_running, existing = MODULE._reserve_request(
+            first_running, first_execution, existing = MODULE._reserve_request(
                 output_path, "same-running-task", False, 10
             )
             self.assertIsNotNone(first_running)
@@ -120,6 +136,7 @@ class ImageMetadataTests(unittest.TestCase):
             payload = {
                 "ok": True,
                 "request_id": "same-running-task",
+                "execution_id": first_execution,
                 "preview_files": [image_path.resolve().as_posix()],
             }
 
@@ -130,14 +147,15 @@ class ImageMetadataTests(unittest.TestCase):
                 MODULE._release_request(first_running)
 
             with mock.patch.object(MODULE.time, "sleep", side_effect=finish_first_request):
-                second_running, reused = MODULE._reserve_request(
+                second_running, second_execution, reused = MODULE._reserve_request(
                     output_path, "same-running-task", True, 10
                 )
 
             self.assertIsNone(second_running)
+            self.assertEqual(second_execution, first_execution)
             self.assertEqual(reused, payload)
 
-    def test_existing_ready_result_does_not_call_image_api(self):
+    def test_same_request_id_after_completed_run_calls_image_api_again(self):
         with TemporaryDirectory() as output_dir:
             output_path = Path(output_dir)
             image_path = output_path / "image-current.png"
@@ -145,6 +163,7 @@ class ImageMetadataTests(unittest.TestCase):
             payload = {
                 "ok": True,
                 "request_id": "existing-ready-task",
+                "execution_id": "finished-execution",
                 "preview_files": [image_path.resolve().as_posix()],
             }
             MODULE._write_sidecar(
@@ -172,8 +191,10 @@ class ImageMetadataTests(unittest.TestCase):
             ):
                 self.assertEqual(MODULE.main(), 0)
 
-            call_api.assert_not_called()
-            self.assertEqual(json.loads(stdout.getvalue()), payload)
+            call_api.assert_called_once()
+            self.assertNotEqual(
+                json.loads(stdout.getvalue())["execution_id"], "finished-execution"
+            )
 
     def test_config_check_reports_exact_skill_version(self):
         stdout = io.StringIO()
@@ -188,7 +209,7 @@ class ImageMetadataTests(unittest.TestCase):
         ):
             self.assertEqual(MODULE.main(), 0)
 
-        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.2.8")
+        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.2.9")
 
     def test_success_publishes_one_ready_sidecar_without_cleanup_markers(self):
         with TemporaryDirectory() as output_dir:
@@ -232,6 +253,7 @@ class ImageMetadataTests(unittest.TestCase):
 
             payload = json.loads(stdout.getvalue())
             self.assertTrue(payload["ok"])
+            self.assertTrue(payload["execution_id"])
             self.assertEqual(
                 json.loads((output_path / ".ready-ready-task.json").read_text(encoding="utf-8")),
                 payload,

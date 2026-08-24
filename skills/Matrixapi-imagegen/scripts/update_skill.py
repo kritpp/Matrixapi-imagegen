@@ -69,7 +69,17 @@ def _resolve_archive_url() -> str:
 
 
 def _safe_member_path(name: str) -> tuple[str, ...]:
-    normalized = name.replace("\\", "/").strip("/")
+    normalized = name.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or "\x00" in normalized
+        or re.match(r"^[A-Za-z]:", normalized)
+    ):
+        raise UpdateError("The update archive contains an unsafe path")
+    normalized = normalized.rstrip("/")
     parts = tuple(part for part in normalized.split("/") if part)
     if not parts or any(part in {".", ".."} for part in parts):
         raise UpdateError("The update archive contains an unsafe path")
