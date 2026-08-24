@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.3.0.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.3.1.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,16 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.3.0`。本版本支持最多 16 张参考图，并保留按实际执行批次绑定结果：只有在首个命令仍运行时已经重叠启动的同任务进程，才能复用该批次的结果；首个命令退出后的任何新执行都会重新生成，即使任务 ID 相同，也不会展示旧图。自动更新器同时兼容合法的 `./` ZIP 路径。图片保存后仍立即输出成功 JSON，不增加目录扫描或额外收尾检查。
+当前版本：`1.3.1`。本版本要求多参考图只使用当前消息的准确附件路径，并在联网前核对附件数量；缺少任何路径时立即停止，不再扫描临时目录、猜测图片或少图提交。直接生图、编辑接口、结果绑定和快速成功 JSON 流程保持不变。
 
-Current version: `1.3.0`. This release accepts up to 16 reference images and keeps results bound to the active execution: only a process that overlaps the still-running original task can reuse its exact result. Any later invocation generates a new image even when the task ID is reused. The updater also accepts legitimate ZIP entries beginning with `./`, without adding image API calls or post-success scans.
+Current version: `1.3.1`. Multi-reference requests now use only exact attachment paths from the current message and verify the expected attachment count before any network request. Missing paths fail locally instead of scanning temp directories, guessing inputs, or silently submitting fewer references. Text-to-image generation, edit transport, execution-bound results, and immediate success JSON remain unchanged.
+
+### 1.3.1
+
+- 多参考图只接受当前消息的准确附件路径；联网前核对期望数量，缺图时明确停止且不调用图片接口。
+- 禁止为寻找输入图片扫描临时目录或历史目录，避免漏图、旧图混入和多轮无效命令。
+- Direct generation and existing image request/result behavior are unchanged.
+- Multi-reference requests accept only exact current-message attachment paths and validate the expected count before contacting the image API.
 
 ### 1.3.0
 

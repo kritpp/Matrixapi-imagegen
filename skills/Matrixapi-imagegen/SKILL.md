@@ -10,9 +10,10 @@ Generate or edit images with the bundled script and show the saved result to the
 ## Workflow
 
 1. Resolve `scripts/generate.py` relative to this `SKILL.md` file.
-2. Turn the user's request into a complete image prompt. Preserve requested subject, composition, style, lighting, colors, text, and constraints. Do not invent identifying details. When the user supplies a local image, pass it as `--image`; pass a supplied mask as `--mask`.
+2. Turn the user's request into a complete image prompt. Preserve requested subject, composition, style, lighting, colors, text, and constraints. Do not invent identifying details. When the user supplies local images, use only the exact attachment paths exposed by the current user message, in attachment order, and pass every one as a separate `--image`. Never scan a temp, clipboard, Downloads, workspace, or generated-images directory to discover or guess input images, and never substitute an image from an earlier message or task. Pass a supplied mask as `--mask`.
 3. Choose the requested size, or use `1024x1024` when none is given. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for landscape 2K, `3840x2160` for landscape 4K, and `2160x3840` for portrait 4K. Both edges must be multiples of 16, the longest edge must not exceed 3840 pixels or three times the shorter edge, and total pixels must be between 655,360 and 8,294,400.
 4. Choose the request mode automatically: no `--image` uses `/v1/images/generations`; one or more `--image` files uses multipart `/v1/images/edits`; `--mask` is optional for edit/inpaint requests. Repeat `--image` for multiple reference images, up to sixteen. Send the requested size unchanged for edits, including 1K, 2K, and 4K sizes; the provider decides whether that size is supported and may return an error. The original input file is never overwritten.
+   For current-message attachments, count the attachment paths before running anything and add `--expected-images <count>` to the single edit command. This count must equal the number of images attached to that user message. If any current attachment path is unavailable, stop with the missing count instead of scanning directories, silently submitting fewer images, or asking the image API to generate from an incomplete set. Do not run separate shell commands to enumerate, locate, compare, hash, or inspect attachment files; the generation script validates the exact paths once before contacting the API.
    When the user requests high quality, HD, a final-quality render, `高清`, or `高质量`, include `--quality high` on the single generation/edit command. Do not silently replace it with `standard` or omit it. Leave quality unset only when the user did not request a quality level.
 5. Run a generation with one unique task ID for the whole user request:
 
@@ -23,7 +24,7 @@ Generate or edit images with the bundled script and show the saved result to the
    For an edit with an original image:
 
    ```text
-   python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --image "<path>" --n 1
+   python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --expected-images <attachment-count> --image "<path-1>" --image "<path-2>" --n 1
    ```
 
    For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.

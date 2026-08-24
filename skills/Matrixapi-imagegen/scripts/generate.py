@@ -31,7 +31,7 @@ MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-SKILL_VERSION = "1.3.0"
+SKILL_VERSION = "1.3.1"
 
 
 class ImageGenError(RuntimeError):
@@ -788,6 +788,12 @@ def parse_args() -> argparse.Namespace:
         help="Optional local PNG/JPEG mask for the edit request",
     )
     parser.add_argument(
+        "--expected-images",
+        type=int,
+        metavar="COUNT",
+        help="Require exactly COUNT current-message input images before contacting the API",
+    )
+    parser.add_argument(
         "--mode",
         choices=("auto", "generate", "edit"),
         default="auto",
@@ -851,6 +857,18 @@ def main() -> int:
             raise ImageGenError("Prompt must not be empty")
 
         image_paths = list(args.images or [])
+        if args.expected_images is not None:
+            if args.expected_images < 1 or args.expected_images > MAX_INPUT_IMAGES:
+                raise ImageGenError(
+                    f"Expected image count must be between 1 and {MAX_INPUT_IMAGES}"
+                )
+            if len(image_paths) != args.expected_images:
+                missing = max(args.expected_images - len(image_paths), 0)
+                raise ImageGenError(
+                    "Current-message attachment count mismatch: "
+                    f"expected {args.expected_images}, received {len(image_paths)}, "
+                    f"missing {missing}; no image request was sent"
+                )
         if args.mode == "generate" and (image_paths or args.mask):
             raise ImageGenError("--mode generate cannot be combined with --image or --mask")
         if args.mode == "edit" and not image_paths:

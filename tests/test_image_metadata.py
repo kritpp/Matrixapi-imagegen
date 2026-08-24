@@ -209,7 +209,7 @@ class ImageMetadataTests(unittest.TestCase):
         ):
             self.assertEqual(MODULE.main(), 0)
 
-        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.3.0")
+        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.3.1")
 
     def test_high_quality_is_sent_once_and_reported(self):
         with TemporaryDirectory() as output_dir:
@@ -266,6 +266,72 @@ class ImageMetadataTests(unittest.TestCase):
                 )
 
         post_request.assert_called_once()
+
+    def test_rejects_incomplete_current_message_attachments_before_api_call(self):
+        argv = [
+            "generate.py",
+            "--request-id",
+            "missing-attachments",
+            "--prompt",
+            "combine all current references",
+            "--expected-images",
+            "16",
+        ]
+        for index in range(11):
+            argv.extend(("--image", f"reference-{index}.png"))
+
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                MODULE,
+                "discover_credentials",
+                return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+            ),
+            mock.patch.object(MODULE, "call_edit_api") as call_edit_api,
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            self.assertEqual(MODULE.main(), 1)
+
+        call_edit_api.assert_not_called()
+        error = json.loads(stderr.getvalue())["error"]
+        self.assertIn("expected 16, received 11, missing 5", error)
+        self.assertIn("no image request was sent", error)
+
+    def test_expected_image_count_does_not_affect_text_generation(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            image_path = output_path / "generated.png"
+            image_path.write_bytes(b"validated image")
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "text-only-generation",
+                "--prompt",
+                "a new image without references",
+                "--out-dir",
+                str(output_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+                ),
+                mock.patch.object(MODULE, "call_api", return_value={"data": [{}]}) as call_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    return_value=([str(image_path)], [{"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}]),
+                ),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            call_api.assert_called_once()
+            self.assertEqual(json.loads(stdout.getvalue())["mode"], "generate")
 
     def test_success_publishes_one_ready_sidecar_without_cleanup_markers(self):
         with TemporaryDirectory() as output_dir:
