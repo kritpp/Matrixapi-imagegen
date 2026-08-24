@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.7.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.2.8.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,22 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.7`。本版本在保存图片后优先输出成功 JSON；隐藏 JSON 或写入任务标记失败时也不会抑制成功结果，避免 Codex 因未捕获结果而重复生图；同时保留 v1.2.6 的根目录自动安装脚本、参考图上限 15 张、任务 ID 防重和旧图隔离。
+当前版本：`1.2.8`。本版本会在图片请求开始前锁定任务；当命令仍在运行时，Codex 只继续等待同一进程，不能把暂时没有 JSON 误判为失败。即使发生同任务重叠调用，后一个进程也只复用第一次的结果，不会再次请求图片接口。图片保存后仍立即输出成功 JSON，不增加目录扫描或额外收尾检查。
 
-Current version: `1.2.5`, treating one validated success JSON as the final result and ending the task immediately after rendering while retaining up to 15 reference images, task-ID deduplication, and old-image isolation.
+Current version: `1.2.8`, keeping one command session active until its real completion and reusing the first result if the same task is invoked concurrently, without adding image API calls or post-success scans.
+
+### 1.2.8
+
+- 命令仍在运行时只续等原命令，不再因暂时没有 stdout/JSON 启动第二次生图。
+- 图片请求前原子锁定任务；同任务发生重叠调用时复用首次成功结果，不重复调用或计费。
+- 图片保存后立即输出成功 JSON，隐藏记录文件和重复保护不会增加正常展示链路。
+- `--check-config` 新增明确的 `skill_version`，日志 User-Agent 同步为当前版本。
+- 压缩包继续包含 Windows 与 macOS 根目录自动安装脚本。
+- While a command is still running, Codex resumes the same command instead of starting another image request because stdout is temporarily empty.
+- A task is reserved before the API call; overlapping invocations reuse the first successful result without another image request or charge.
+- The success JSON is emitted immediately after saving, with no extra post-success scans.
+- `--check-config` now reports the authoritative `skill_version`, and the request User-Agent matches it.
+- Windows and macOS root-level automatic installers remain included in the package.
 
 ### 1.2.5
 

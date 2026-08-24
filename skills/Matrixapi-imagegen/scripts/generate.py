@@ -31,6 +31,7 @@ MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MAX_INPUT_IMAGES = 15
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+SKILL_VERSION = "1.2.8"
 
 
 class ImageGenError(RuntimeError):
@@ -270,7 +271,7 @@ def _post_image_request(
             "Authorization": f"Bearer {key}",
             "Content-Type": content_type,
             "Accept": "application/json",
-            "User-Agent": "api-imagegen-skill/1.1",
+            "User-Agent": f"Matrixapi-imagegen-skill/{SKILL_VERSION}",
         },
         method="POST",
     )
@@ -553,7 +554,7 @@ def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[by
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ImageGenError("Image API returned an unsupported image URL")
-    headers = {"User-Agent": "api-imagegen-skill/1.1"}
+    headers = {"User-Agent": f"Matrixapi-imagegen-skill/{SKILL_VERSION}"}
     if _origin(url) == _origin(endpoint):
         headers["Authorization"] = f"Bearer {key}"
     request = urllib.request.Request(url, headers=headers)
@@ -620,6 +621,10 @@ def _ready_marker(output_dir: Path, request_id: str) -> Path:
     return output_dir / f".ready-{request_id}.json"
 
 
+def _running_marker(output_dir: Path, request_id: str) -> Path:
+    return output_dir / f".running-{request_id}.json"
+
+
 def _write_sidecar(path: Path, payload: dict[str, Any]) -> None:
     temp_path = path.with_suffix(path.suffix + ".part")
     temp_path.write_text(
@@ -648,6 +653,94 @@ def _hide_sidecar(path: Path) -> None:
     except (AttributeError, OSError):
         # The sidecar remains usable if the platform cannot set Explorer flags.
         return
+
+
+def _load_ready_result(path: Path, request_id: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ImageGenError("The saved result for this task is not readable") from exc
+    preview_files = payload.get("preview_files") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("ok") is not True
+        or payload.get("request_id") != request_id
+        or not isinstance(preview_files, list)
+        or not preview_files
+        or any(not isinstance(path_value, str) or not Path(path_value).is_file() for path_value in preview_files)
+    ):
+        raise ImageGenError("The saved result for this task is incomplete")
+    return payload
+
+
+def _running_marker_expired(path: Path) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return float(payload["expires_at"]) <= time.time()
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _reserve_request(
+    output_dir: Path,
+    request_id: str,
+    allow_repeat: bool,
+    timeout: int,
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """Reserve a task before the API call and reuse an overlapping task's result."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    completed = _completion_marker(output_dir, request_id)
+    ready = _ready_marker(output_dir, request_id)
+    running = _running_marker(output_dir, request_id)
+    reservation_seconds = timeout * 2 + 60
+    deadline = time.monotonic() + reservation_seconds
+    waited_for_running = False
+
+    while True:
+        if ready.is_file() and (not allow_repeat or waited_for_running):
+            return None, _load_ready_result(ready, request_id)
+        if not allow_repeat and completed.is_file():
+            raise ImageGenError(
+                "This task ID has already completed; ask explicitly to retry before generating again"
+            )
+        try:
+            descriptor = os.open(running, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            waited_for_running = True
+            if _running_marker_expired(running):
+                try:
+                    running.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise ImageGenError(
+                    "This task ID is still running; continue waiting for the original command"
+                )
+            time.sleep(0.1)
+            continue
+
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "request_id": request_id,
+                    "skill_version": SKILL_VERSION,
+                    "expires_at": time.time() + reservation_seconds,
+                },
+                handle,
+            )
+        try:
+            _hide_sidecar(running)
+        except Exception:
+            pass
+        return running, None
+
+
+def _release_request(running: Path) -> None:
+    try:
+        running.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -717,6 +810,7 @@ def main() -> int:
                         "ok": True,
                         "credential_source": source,
                         "model": model,
+                        "skill_version": SKILL_VERSION,
                         "supported_modes": ["generate", "edit"],
                     },
                     ensure_ascii=False,
@@ -743,12 +837,13 @@ def main() -> int:
         output_dir = args.out_dir or (
             Path.home() / ".codex" / "generated_images" / "api-imagegen"
         )
-        completed = _completion_marker(output_dir, request_id)
         ready = _ready_marker(output_dir, request_id)
-        if (completed.is_file() or ready.is_file()) and not args.allow_repeat:
-            raise ImageGenError(
-                "This task ID has already completed; ask explicitly to retry before generating again"
-            )
+        running, existing_result = _reserve_request(
+            output_dir, request_id, args.allow_repeat, args.timeout
+        )
+        if existing_result is not None:
+            print(json.dumps(existing_result, ensure_ascii=False), flush=True)
+            return 0
         options = _option_fields(args.quality, args.background, args.input_fidelity)
         if mode == "edit":
             result = call_edit_api(
@@ -788,6 +883,7 @@ def main() -> int:
             "request_id": request_id,
             "mode": mode,
             "model": model,
+            "skill_version": SKILL_VERSION,
             "count": len(files),
             "size": size,
             "requested_size": requested_size,
@@ -821,6 +917,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    finally:
+        if "running" in locals() and running is not None:
+            _release_request(running)
 
 
 if __name__ == "__main__":

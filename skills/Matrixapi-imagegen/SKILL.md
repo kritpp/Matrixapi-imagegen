@@ -26,6 +26,12 @@ Generate or edit images with the bundled script and show the saved result to the
    ```
 
    For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
+   Run this script exactly once for the task. If the command tool reports that the
+   process is still running, resume or wait on that same command session until it
+   exits. A running process with no stdout is not a failed request. Do not start a
+   second Python process, create a new task ID, or tell the user that the result is
+   missing while the original command remains active. Keep this continuation silent;
+   do not emit progress narration between waits.
 6. Parse the single success JSON line written to stdout. For each output, use the matching item already present in `image_info` to report the actual saved image dimensions, file format, and resolution label, then render the preview and download link using the exact normalized paths from `preview_files` and `download_files`:
 
    ```text
@@ -37,7 +43,7 @@ Generate or edit images with the bundled script and show the saved result to the
    Resolution labels use the output's longest edge: `4K` at 3840px or above, `2K` at 2048px or above, otherwise `1K`.
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
 
-   Require only `ok: true`, a matching `request_id`, and a non-empty `preview_files` entry. The script has already validated the returned files and dimensions, written the hidden ready marker for task de-duplication, and emitted the final success JSON. Treat that one success JSON line as the final completion signal: render immediately and end the task. Do not run any directory scan, sort, process check, dimension recheck, result-marker wait, or extra command after it; do not send another model/tool request for confirmation. Never scan, sort, or inspect the shared generated-images directory, choose the newest or first image, or use any path from an earlier request, conversation, or Codex installation. If the task has a real API/script failure, preserve the existing retry policy and use only the returned JSON from the retry that actually succeeds. These rules apply equally to new images, edits, redraws, and second-pass modifications.
+   Require only `ok: true`, a matching `request_id`, and a non-empty `preview_files` entry. The script has already validated the returned files and dimensions, reserved the task before contacting the API, written the hidden ready marker, and emitted the final success JSON. Treat that one success JSON line as the final completion signal: render immediately and end the task. Do not run any directory scan, sort, process check, dimension recheck, result-marker wait, or extra command after it; do not send another model/tool request for confirmation. Never scan, sort, or inspect the shared generated-images directory, choose the newest or first image, or use any path from an earlier request, conversation, or Codex installation. Only an explicit script error after the original process exits can enter the existing retry policy. A missing JSON from a command that is still running can never trigger a retry. If an overlapping invocation nevertheless occurs with the same task ID, the script waits internally and returns the first invocation's exact result without making another image API request. These rules apply equally to new images, edits, redraws, and second-pass modifications.
 7. If generation or editing fails, report the sanitized error. Report the requested and actual saved size from the JSON fields. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Configuration
@@ -60,6 +66,7 @@ python <skill-directory>/scripts/generate.py --check-config
 ```
 
 The check reports only whether a supported configuration was found, its generic source type, and the selected model. Do not print the provider name, endpoint, or credential.
+It also reports `skill_version`, which is the authoritative installed version; do not infer the version from a folder name or an old log entry.
 
 ## Updating the Skill
 

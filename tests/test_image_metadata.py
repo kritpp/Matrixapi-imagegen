@@ -107,6 +107,89 @@ class ImageMetadataTests(unittest.TestCase):
             call_api.assert_not_called()
             self.assertIn("already completed", json.loads(stderr.getvalue())["error"])
 
+    def test_overlapping_request_reuses_first_result(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            image_path = output_path / "image-current.png"
+            image_path.write_bytes(b"validated image")
+            first_running, existing = MODULE._reserve_request(
+                output_path, "same-running-task", False, 10
+            )
+            self.assertIsNotNone(first_running)
+            self.assertIsNone(existing)
+            payload = {
+                "ok": True,
+                "request_id": "same-running-task",
+                "preview_files": [image_path.resolve().as_posix()],
+            }
+
+            def finish_first_request(_seconds):
+                MODULE._write_sidecar(
+                    MODULE._ready_marker(output_path, "same-running-task"), payload
+                )
+                MODULE._release_request(first_running)
+
+            with mock.patch.object(MODULE.time, "sleep", side_effect=finish_first_request):
+                second_running, reused = MODULE._reserve_request(
+                    output_path, "same-running-task", True, 10
+                )
+
+            self.assertIsNone(second_running)
+            self.assertEqual(reused, payload)
+
+    def test_existing_ready_result_does_not_call_image_api(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            image_path = output_path / "image-current.png"
+            image_path.write_bytes(b"validated image")
+            payload = {
+                "ok": True,
+                "request_id": "existing-ready-task",
+                "preview_files": [image_path.resolve().as_posix()],
+            }
+            MODULE._write_sidecar(
+                MODULE._ready_marker(output_path, "existing-ready-task"), payload
+            )
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "existing-ready-task",
+                "--prompt",
+                "a cat",
+                "--out-dir",
+                str(output_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+                ),
+                mock.patch.object(MODULE, "call_api") as call_api,
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            call_api.assert_not_called()
+            self.assertEqual(json.loads(stdout.getvalue()), payload)
+
+    def test_config_check_reports_exact_skill_version(self):
+        stdout = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["generate.py", "--check-config"]),
+            mock.patch.object(
+                MODULE,
+                "discover_credentials",
+                return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+            ),
+            mock.patch.object(sys, "stdout", stdout),
+        ):
+            self.assertEqual(MODULE.main(), 0)
+
+        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.2.8")
+
     def test_success_publishes_one_ready_sidecar_without_cleanup_markers(self):
         with TemporaryDirectory() as output_dir:
             output_path = Path(output_dir)
@@ -122,6 +205,11 @@ class ImageMetadataTests(unittest.TestCase):
                 "--out-dir",
                 str(output_path),
             ]
+
+            def assert_success_precedes_hiding(path):
+                if path.name.startswith(".ready-"):
+                    self.assertTrue(json.loads(stdout.getvalue())["ok"])
+
             with (
                 mock.patch.object(sys, "argv", argv),
                 mock.patch.object(
@@ -136,6 +224,9 @@ class ImageMetadataTests(unittest.TestCase):
                     return_value=([str(image_path)], [{"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}]),
                 ),
                 mock.patch.object(sys, "stdout", stdout),
+                mock.patch.object(
+                    MODULE, "_hide_sidecar", side_effect=assert_success_precedes_hiding
+                ),
             ):
                 self.assertEqual(MODULE.main(), 0)
 
@@ -147,6 +238,7 @@ class ImageMetadataTests(unittest.TestCase):
             )
             self.assertFalse((output_path / ".result-ready-task.json").exists())
             self.assertFalse((output_path / ".completed-ready-task.json").exists())
+            self.assertFalse((output_path / ".running-ready-task.json").exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows Explorer attributes are platform-specific")
     def test_sidecar_is_hidden_without_changing_its_path(self):
