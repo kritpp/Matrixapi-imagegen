@@ -39,7 +39,7 @@ MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.8.8"
+SKILL_VERSION = "1.8.9"
 PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
 EDIT_MAX_EDGE = 1792
@@ -1025,7 +1025,7 @@ def main() -> int:
             except PostprocessError as exc:
                 raise ImageGenError(str(exc)) from exc
             outputs = [item["output"] for item in processed]
-            payload = {"ok": True, "event": "complete", "mode": "local-process", "skill_version": SKILL_VERSION, "count": len(outputs), "original_files": preview_paths(image_paths), "processed_files": preview_paths(outputs), "preview_files": preview_paths(outputs), "download_files": preview_paths(outputs)}
+            payload = {"ok": True, "event": "complete", "mode": "local-process", "skill_version": SKILL_VERSION, "count": len(outputs), "original_files": preview_paths(image_paths), "processed_files": preview_paths(outputs), "preview_files": preview_paths(outputs), "download_files": preview_paths(outputs), "result_ref": {"scope": "current-conversation", "files": preview_paths(outputs)}}
             print(json.dumps(payload, ensure_ascii=False), flush=True)
             return 0
         request_id = (args.request_id or uuid.uuid4().hex).strip()
@@ -1184,6 +1184,13 @@ def main() -> int:
                             "preview_file": preview_paths(saved_files)[0],
                             "download_file": preview_paths(saved_files)[0],
                             "image_info": saved_info[0],
+                            "result_ref": {
+                                "scope": "current-conversation",
+                                "request_id": request_id,
+                                "execution_id": execution_id,
+                                "request_fingerprint": fingerprint,
+                                "files": preview_paths(saved_files),
+                            },
                         },
                         ensure_ascii=False,
                     ),
@@ -1248,6 +1255,13 @@ def main() -> int:
             "preview_files": preview_files,
             "download_files": download_files,
             "image_info": image_info,
+            "result_ref": {
+                "scope": "current-conversation",
+                "request_id": request_id,
+                "execution_id": execution_id,
+                "request_fingerprint": fingerprint,
+                "files": preview_files,
+            },
         }
 
         # Write the marker before announcing success so retries remain bound to
