@@ -210,7 +210,7 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(MODULE.main(), 0)
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["skill_version"], "1.4.0")
+        self.assertEqual(payload["skill_version"], "1.8.8")
         self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
 
     def test_five_requested_outputs_run_sequentially_without_a_skill_cap(self):
