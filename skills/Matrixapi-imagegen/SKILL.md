@@ -27,14 +27,14 @@ Generate or edit images with the bundled script and show the saved result to the
    python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --expected-images <attachment-count> --image "<path-1>" --image "<path-2>" --n 1
    ```
 
-   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
+   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests a different total output count. The Skill does not impose an output-count maximum. It fulfills a multi-output request as sequential single-image API calls inside this one command, saving every successful image before starting the next so one later failure cannot discard earlier files.
    Run this script exactly once for the task. If the command tool reports that the
    process is still running, resume or wait on that same command session until it
    exits. A running process with no stdout is not a failed request. Do not start a
    second Python process, create a new task ID, or tell the user that the result is
    missing while the original command remains active. Keep this continuation silent;
    do not emit progress narration between waits.
-6. Parse the single success JSON line written to stdout. For each output, use the matching item already present in `image_info` to report the actual saved image dimensions, file format, and resolution label, then render the preview and download link using the exact normalized paths from `preview_files` and `download_files`:
+6. For a multi-output request, the script writes an `image_saved` JSON line immediately after each image reaches local storage. Render that exact `preview_file` and link its `download_file` immediately, then silently resume the same command session; do not start another command or add progress narration. The final `complete` JSON line summarizes every saved output. For each output, use its existing `image_info` to report the actual saved dimensions, file format, and resolution label:
 
    ```text
    已生成，尺寸经检查为 3840 x 2160，PNG 格式，画质为 4K。
@@ -45,7 +45,7 @@ Generate or edit images with the bundled script and show the saved result to the
    Resolution labels use the output's longest edge: `4K` at 3840px or above, `2K` at 2048px or above, otherwise `1K`.
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
 
-   Require only `ok: true`, a matching `request_id`, a non-empty `execution_id`, and a non-empty `preview_files` entry. The script has already validated the returned files and dimensions, reserved the task before contacting the API, written the hidden ready marker, and emitted the final success JSON. Treat that one success JSON line as the final completion signal: render immediately and end the task. Do not run any directory scan, sort, process check, dimension recheck, result-marker wait, or extra command after it; do not send another model/tool request for confirmation. Never scan, sort, or inspect the shared generated-images directory, choose the newest or first image, or use any path from an earlier request, conversation, or Codex installation. Only an explicit script error after the original process exits can enter the existing retry policy. A missing JSON from a command that is still running can never trigger a retry. If an overlapping invocation nevertheless occurs with the same task ID while the original process is still active, the script waits internally and returns that active execution's exact result without making another image API request. Once the original process exits, a later invocation is always a new execution and cannot reuse an older ready result, even if its task ID is the same. These rules apply equally to new images, edits, redraws, and second-pass modifications.
+   Require `ok: true`, a matching `request_id`, a non-empty `execution_id`, and a usable preview path. An `image_saved` event is a validated partial result, not permission to start another command. Treat the final `event: complete` line as completion. If it reports `partial: true`, keep and display all completed images, report which output failed, and do not retry unless the user explicitly asks. Do not run any directory scan, sort, process check, dimension recheck, marker wait, or extra command after the final event. Never choose a file from an earlier request. A command that is still running can never trigger a retry. These rules apply equally to new images, edits, redraws, and second-pass modifications.
 7. If generation or editing fails, report the sanitized error. Report the requested and actual saved size from the JSON fields. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Configuration
@@ -59,7 +59,7 @@ The script discovers credentials in this order:
 2. `OPENAI_API_KEY` and `OPENAI_BASE_URL`, only when the URL is the fixed API address.
 3. The current Codex provider selected in CC Switch, only when it points to the fixed API address.
 
-The API must implement `POST /v1/images/generations` for new images and `POST /v1/images/edits` with multipart `image`/optional `mask` fields for editing. Responses may return either `data[].url` or `data[].b64_json`. The default model is `gpt-image-2`; set `IMAGEGEN_MODEL` to use another model exposed by the API.
+The API must implement `POST /v1/images/generations` for new images and `POST /v1/images/edits` with multipart `image`/optional `mask` fields for editing. Responses may return either `data[].url` or `data[].b64_json`. Supported models are `gpt-image-2` and `gpt-image-2-pro`; the default is `gpt-image-2`. Set `IMAGEGEN_MODEL=gpt-image-2-pro` to use Pro.
 
 To diagnose setup without generating or charging for an image, run:
 
@@ -67,7 +67,7 @@ To diagnose setup without generating or charging for an image, run:
 python <skill-directory>/scripts/generate.py --check-config
 ```
 
-The check reports only whether a supported configuration was found, its generic source type, and the selected model. Do not print the provider name, endpoint, or credential.
+The check reports only whether a supported configuration was found, its generic source type, the current model, both supported models, and the exact Skill version. Do not print the provider name, endpoint, or credential.
 It also reports `skill_version`, which is the authoritative installed version; do not infer the version from a folder name or an old log entry.
 
 ## Updating the Skill
@@ -78,7 +78,7 @@ When the user asks to `更新 Matrixapi-imagegen`, run:
 python <skill-directory>/scripts/update_skill.py
 ```
 
-The updater downloads the latest package from the official GitHub repository and replaces this Skill directory while preserving credentials stored outside it. Restart Codex after a successful update.
+The updater downloads the latest package from the official GitHub repository, atomically replaces this Skill directory, validates the installed version/configuration, and removes a recognized legacy `api-imagegen` Skill directory. It never deletes or moves historical images under `generated_images/api-imagegen`; new results use `generated_images/Matrixapi-imagegen`. After success, report the installed version, `gpt-image-2` and `gpt-image-2-pro` as supported models, the current model, and the restart requirement from the updater JSON.
 
 ## Boundaries
 

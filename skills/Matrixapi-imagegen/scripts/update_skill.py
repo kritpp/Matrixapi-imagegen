@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -33,6 +35,8 @@ REQUIRED_FILES = (
     "scripts/generate.py",
     "agents/openai.yaml",
 )
+LEGACY_SKILL_NAME = "api-imagegen"
+SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
 
 
 class UpdateError(RuntimeError):
@@ -161,7 +165,7 @@ def _replace_skill(target: Path, staged: Path) -> None:
     if not target.is_dir():
         raise UpdateError(f"Installed Skill directory not found: {target}")
 
-    backup = target.parent / f".{target.name}.backup-{uuid.uuid4().hex[:10]}"
+    backup = target.parent.parent / f".{target.name}.backup-{uuid.uuid4().hex[:10]}"
     moved_old = False
     try:
         os.replace(target, backup)
@@ -182,7 +186,49 @@ def _replace_skill(target: Path, staged: Path) -> None:
         pass
 
 
-def update_skill(archive_url: str, target: Path) -> None:
+def _remove_recognized_legacy_skill(target: Path) -> bool:
+    legacy = target.parent / LEGACY_SKILL_NAME
+    if not legacy.exists():
+        return False
+    skill_file = legacy / "SKILL.md"
+    script_file = legacy / "scripts" / "generate.py"
+    try:
+        skill_text = skill_file.read_text(encoding="utf-8")
+        script_text = script_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise UpdateError(
+            "The legacy api-imagegen Skill could not be verified and was left unchanged"
+        ) from exc
+    if "name: api-imagegen" not in skill_text or "api-imagegen-skill/" not in script_text:
+        raise UpdateError(
+            "The existing api-imagegen directory is not a recognized legacy Skill and was left unchanged"
+        )
+    try:
+        shutil.rmtree(legacy)
+    except OSError as exc:
+        raise UpdateError("The legacy api-imagegen Skill could not be removed") from exc
+    return True
+
+
+def _installed_check(target: Path) -> dict:
+    command = [sys.executable, str(target / "scripts" / "generate.py"), "--check-config"]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        payload = json.loads(completed.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        raise UpdateError("The installed Skill configuration check did not complete") from exc
+    if completed.returncode != 0 or payload.get("ok") is not True:
+        raise UpdateError("The installed Skill configuration check failed")
+    return payload
+
+
+def update_skill(archive_url: str, target: Path) -> bool:
     lock_path = target.parent / f".{target.name}.update.lock"
     try:
         lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -209,6 +255,8 @@ def update_skill(archive_url: str, target: Path) -> None:
             staged.mkdir()
             _extract_skill(archive_data, staged)
             _replace_skill(target, staged)
+        legacy_removed = _remove_recognized_legacy_skill(target)
+        return legacy_removed
     finally:
         try:
             lock_path.unlink()
@@ -227,8 +275,24 @@ def main() -> int:
     args = parse_args()
     target = args.target or Path(__file__).resolve().parents[1]
     try:
-        update_skill(args.archive_url, target)
-        print(json.dumps({"ok": True, "updated": True}, ensure_ascii=False))
+        legacy_removed = update_skill(args.archive_url, target)
+        installed = _installed_check(target)
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "updated": True,
+                    "installed_version": installed.get("skill_version"),
+                    "current_model": installed.get("model"),
+                    "supported_models": installed.get(
+                        "supported_models", list(SUPPORTED_MODELS)
+                    ),
+                    "legacy_skill_removed": legacy_removed,
+                    "restart_required": True,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
     except UpdateError as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))

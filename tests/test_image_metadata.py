@@ -209,7 +209,166 @@ class ImageMetadataTests(unittest.TestCase):
         ):
             self.assertEqual(MODULE.main(), 0)
 
-        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.3.1")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["skill_version"], "1.3.3")
+        self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
+
+    def test_five_requested_outputs_run_sequentially_without_a_skill_cap(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            image_paths = [output_path / f"image-{index}.png" for index in range(5)]
+            for image_path in image_paths:
+                image_path.write_bytes(b"validated image")
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "five-output-task",
+                "--prompt",
+                "five poster variants",
+                "--n",
+                "5",
+                "--out-dir",
+                str(output_path),
+            ]
+            image_info = [
+                {"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}
+                for _ in image_paths
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+                ),
+                mock.patch.object(MODULE, "call_api", return_value={"data": [{}]}) as call_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    side_effect=[([str(path)], [info]) for path, info in zip(image_paths, image_info)],
+                ),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            self.assertEqual(call_api.call_count, 5)
+            self.assertTrue(all(call.args[5] == 1 for call in call_api.call_args_list))
+            events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+            self.assertEqual([event["event"] for event in events[:-1]], ["image_saved"] * 5)
+            self.assertEqual(events[-1]["event"], "complete")
+            self.assertEqual(events[-1]["requested_count"], 5)
+            self.assertEqual(events[-1]["count"], 5)
+            self.assertFalse(events[-1]["partial"])
+
+    def test_later_output_failure_keeps_earlier_saved_image_without_retry(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            first_image = output_path / "image-first.png"
+            first_image.write_bytes(b"validated image")
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "partial-output-task",
+                "--prompt",
+                "three poster variants",
+                "--n",
+                "3",
+                "--out-dir",
+                str(output_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2-pro", "test"),
+                ),
+                mock.patch.object(
+                    MODULE,
+                    "call_api",
+                    side_effect=[{"data": [{}]}, MODULE.ImageGenError("second output failed")],
+                ) as call_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    return_value=(
+                        [str(first_image)],
+                        [{"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}],
+                    ),
+                ),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            self.assertEqual(call_api.call_count, 2)
+            events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+            final = events[-1]
+            self.assertTrue(final["ok"])
+            self.assertTrue(final["partial"])
+            self.assertFalse(final["complete"])
+            self.assertEqual(final["count"], 1)
+            self.assertEqual(final["requested_count"], 3)
+            self.assertEqual(final["failed_output"], 2)
+            self.assertEqual(final["error"], "second output failed")
+            self.assertEqual(final["preview_files"], [first_image.resolve().as_posix()])
+
+    def test_default_output_directory_uses_current_skill_name(self):
+        with TemporaryDirectory() as home_dir:
+            output_dir = Path(home_dir) / ".codex" / "generated_images" / "Matrixapi-imagegen"
+            image_path = output_dir / "generated.png"
+            stdout = io.StringIO()
+            argv = ["generate.py", "--request-id", "new-output-dir", "--prompt", "a cat"]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(Path, "home", return_value=Path(home_dir)),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+                ),
+                mock.patch.object(MODULE, "call_api", return_value={"data": [{}]}),
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    return_value=(
+                        [str(image_path)],
+                        [{"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}],
+                    ),
+                ) as save_images,
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            self.assertEqual(save_images.call_args.args[3], output_dir)
+
+    def test_default_timeout_is_six_hundred_seconds(self):
+        with mock.patch.object(sys, "argv", ["generate.py", "--prompt", "a cat"]):
+            self.assertEqual(MODULE.parse_args().timeout, 600)
+
+    def test_zero_requested_outputs_are_rejected_before_api_call(self):
+        stderr = io.StringIO()
+        argv = [
+            "generate.py",
+            "--request-id",
+            "zero-output-task",
+            "--prompt",
+            "no output",
+            "--n",
+            "0",
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(MODULE, "discover_credentials") as discover_credentials,
+            mock.patch.object(MODULE, "call_api") as call_api,
+            mock.patch.object(sys, "stderr", stderr),
+        ):
+            self.assertEqual(MODULE.main(), 1)
+
+        discover_credentials.assert_not_called()
+        call_api.assert_not_called()
+        self.assertEqual(json.loads(stderr.getvalue())["error"], "Image count must be at least 1")
 
     def test_high_quality_is_sent_once_and_reported(self):
         with TemporaryDirectory() as output_dir:

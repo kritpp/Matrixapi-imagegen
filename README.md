@@ -11,20 +11,20 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 使用 PNG 蒙版进行局部重绘
 - 自动选择生成或编辑模式，并保存结果到本机
 - 编辑请求保留用户指定的 1K、2K 或 4K 尺寸，由上游接口决定是否支持
-- 支持 PNG、JPEG、WEBP、GIF 输入；最多 16 张输入图，最多 4 个结果
+- 支持 PNG、JPEG、WEBP、GIF 输入；最多 16 张输入图；输出数量按用户要求原样提交
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
 - Masked local repainting with a PNG mask
 - Automatic generate/edit mode selection and local result saving
 - Edit requests preserve the requested 1K, 2K, or 4K size; the provider decides whether it is supported
-- PNG, JPEG, WEBP, and GIF inputs; up to 16 input images and 4 outputs
+- PNG, JPEG, WEBP, and GIF inputs; up to 16 input images; requested output counts are passed through unchanged
 
 ## 安装 Install
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.3.1.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.3.3.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会完整替换 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。识别到旧版 `api-imagegen` 技能代码时会将其移除，但不会删除 `generated_images\api-imagegen` 中的历史图片。
 
 ### Codex 拉取安装
 
@@ -130,13 +130,33 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 更新 Update
 
-安装完成后，在 Codex 中输入 `更新 Matrixapi-imagegen`，Skill 会下载本仓库的最新版发布包并自动替换本地同名 Skill，API Key 保留在本机。更新器带有互斥锁和有限重试，更新完成后重启 Codex；新建对话时重新输入一次 `$Matrixapi-imagegen`。
+安装完成后，在 Codex 中输入 `更新 Matrixapi-imagegen`，Skill 会下载本仓库的最新版发布包并自动完整替换本地同名 Skill，API Key 保留在本机。更新器会验证实际安装版本、当前模型及 `gpt-image-2`/`gpt-image-2-pro` 支持信息，并清理能安全识别的旧 `api-imagegen` 技能代码；历史图片不会删除。更新完成后重启 Codex；新建对话时重新输入一次 `$Matrixapi-imagegen`。
 
 ## 发布版本 Release
 
-当前版本：`1.3.1`。本版本要求多参考图只使用当前消息的准确附件路径，并在联网前核对附件数量；缺少任何路径时立即停止，不再扫描临时目录、猜测图片或少图提交。直接生图、编辑接口、结果绑定和快速成功 JSON 流程保持不变。
+当前版本：`1.3.3`。输出总数不设技能侧上限；多图在一个本地命令内逐张请求、逐张保存并立即发出预览事件，避免一次批量超时丢失全部结果。默认单张等待提高到 600 秒。自动更新会完整替换技能、报告两个支持模型并安全清理旧技能代码，新图片改存到 `generated_images/Matrixapi-imagegen`，历史图片保持原位。
 
-Current version: `1.3.1`. Multi-reference requests now use only exact attachment paths from the current message and verify the expected attachment count before any network request. Missing paths fail locally instead of scanning temp directories, guessing inputs, or silently submitting fewer references. Text-to-image generation, edit transport, execution-bound results, and immediate success JSON remain unchanged.
+Current version: `1.3.3`. The Skill imposes no total output cap. Multi-output jobs run sequential single-image calls inside one local command, save each result immediately, and emit an immediate preview event so a later failure cannot discard earlier files. The default per-image timeout is now 600 seconds. Updates fully replace the current Skill, report both supported models, safely remove recognized legacy Skill code, and write new results under `generated_images/Matrixapi-imagegen` without moving historical images.
+
+### 1.3.3
+
+- 多图总数不设技能上限；一个本地命令内逐张请求，单次接口调用固定为 1 张。
+- 每张图片保存后立即输出 `image_saved` 预览事件；后续失败时保留并返回全部已成功图片，不自动重试。
+- 单张请求和结果下载默认等待提高到 600 秒，覆盖已确认超过 5 分钟的 4K 编辑。
+- 自动更新完整替换当前技能，安装后显示 `gpt-image-2`、`gpt-image-2-pro` 和当前模型。
+- 仅删除可识别的旧 `api-imagegen` 技能代码；历史图片不删除，新图片使用 `generated_images/Matrixapi-imagegen`。
+- Multi-output jobs have no Skill-side cap and use sequential one-image API calls inside one command.
+- Each saved image emits an immediate preview event; later failures preserve completed files without an automatic retry.
+- The per-image request/download timeout is now 600 seconds.
+- Updates replace the active Skill, report both supported models, retire recognized legacy Skill code, and preserve historical images.
+
+### 1.3.2
+
+- 取消技能侧最多 4 张输出的限制；用户要求 5 张、10 张或其他正整数时原样提交给接口。
+- 默认输出仍为 1 张；零或负数在联网前拒绝，不产生图片费用。
+- 参考图、WA/VX 请求、重试、旧图保护和快速成功 JSON 逻辑均未改动。
+- Removed the Skill-side four-output cap; any positive requested count is passed through unchanged.
+- The default remains one, and non-positive counts fail before the image API is called.
 
 ### 1.3.1
 

@@ -31,7 +31,8 @@ MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-SKILL_VERSION = "1.3.1"
+SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
+SKILL_VERSION = "1.3.3"
 
 
 class ImageGenError(RuntimeError):
@@ -771,6 +772,22 @@ def _release_request(running: Path) -> None:
         pass
 
 
+def _refresh_request_reservation(
+    running: Path, request_id: str, execution_id: str, timeout: int
+) -> None:
+    """Keep a long multi-output task reserved while each image is processed."""
+    _write_sidecar(
+        running,
+        {
+            "request_id": request_id,
+            "execution_id": execution_id,
+            "skill_version": SKILL_VERSION,
+            "expires_at": time.time() + timeout * 2 + 60,
+        },
+    )
+    _hide_sidecar(running)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt")
@@ -805,7 +822,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--background")
     parser.add_argument("--input-fidelity")
     parser.add_argument("--out-dir", type=Path)
-    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument(
         "--request-id",
         help="Caller-owned task identifier used to bind output to this request",
@@ -829,8 +846,8 @@ def main() -> int:
             raise ImageGenError(
                 "Request ID must contain only letters, numbers, dots, underscores, or hyphens"
             )
-        if args.n < 1 or args.n > 4:
-            raise ImageGenError("Image count must be between 1 and 4")
+        if args.n < 1:
+            raise ImageGenError("Image count must be at least 1")
         if args.timeout < 10 or args.timeout > 600:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
         requested_size = validate_size(args.size)
@@ -845,6 +862,7 @@ def main() -> int:
                         "credential_source": source,
                         "model": model,
                         "skill_version": SKILL_VERSION,
+                        "supported_models": list(SUPPORTED_MODELS),
                         "supported_modes": ["generate", "edit"],
                     },
                     ensure_ascii=False,
@@ -881,7 +899,7 @@ def main() -> int:
         mode = "edit" if image_paths else "generate"
         size = edit_working_size(requested_size) if mode == "edit" else requested_size
         output_dir = args.out_dir or (
-            Path.home() / ".codex" / "generated_images" / "api-imagegen"
+            Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
         )
         ready = _ready_marker(output_dir, request_id)
         running, execution_id, existing_result = _reserve_request(
@@ -891,41 +909,82 @@ def main() -> int:
             print(json.dumps(existing_result, ensure_ascii=False), flush=True)
             return 0
         options = _option_fields(args.quality, args.background, args.input_fidelity)
-        if mode == "edit":
-            result = call_edit_api(
-                edit_url,
-                key,
-                model,
-                prompt,
-                size,
-                args.n,
-                image_paths,
-                args.mask,
-                args.timeout,
-                options,
+        files: list[str] = []
+        image_info: list[dict[str, int | str]] = []
+        partial_error = ""
+        failed_output = None
+        for output_index in range(1, args.n + 1):
+            _refresh_request_reservation(
+                running, request_id, execution_id, args.timeout
             )
-        else:
-            result = call_api(
-                generation_url,
-                key,
-                model,
-                prompt,
-                size,
-                args.n,
-                args.timeout,
-                options,
-            )
-        files, image_info = save_images(
-            result,
-            edit_url if mode == "edit" else generation_url,
-            key,
-            output_dir,
-            args.timeout,
-        )
+            try:
+                if mode == "edit":
+                    result = call_edit_api(
+                        edit_url,
+                        key,
+                        model,
+                        prompt,
+                        size,
+                        1,
+                        image_paths,
+                        args.mask,
+                        args.timeout,
+                        options,
+                    )
+                else:
+                    result = call_api(
+                        generation_url,
+                        key,
+                        model,
+                        prompt,
+                        size,
+                        1,
+                        args.timeout,
+                        options,
+                    )
+                one_result = dict(result)
+                one_result["data"] = result["data"][:1]
+                saved_files, saved_info = save_images(
+                    one_result,
+                    edit_url if mode == "edit" else generation_url,
+                    key,
+                    output_dir,
+                    args.timeout,
+                )
+            except ImageGenError as exc:
+                if not files:
+                    raise
+                partial_error = str(exc)
+                failed_output = output_index
+                break
+
+            files.extend(saved_files)
+            image_info.extend(saved_info)
+            if args.n > 1:
+                print(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "event": "image_saved",
+                            "complete": False,
+                            "request_id": request_id,
+                            "execution_id": execution_id,
+                            "image_index": len(files),
+                            "requested_count": args.n,
+                            "preview_file": preview_paths(saved_files)[0],
+                            "download_file": preview_paths(saved_files)[0],
+                            "image_info": saved_info[0],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
         preview_files = preview_paths(files)
         download_files = preview_files.copy()
         result_payload = {
             "ok": True,
+            "event": "complete",
+            "complete": not partial_error,
             "request_id": request_id,
             "execution_id": execution_id,
             "mode": mode,
@@ -933,6 +992,10 @@ def main() -> int:
             "skill_version": SKILL_VERSION,
             "quality": args.quality.strip() if args.quality else None,
             "count": len(files),
+            "requested_count": args.n,
+            "partial": bool(partial_error),
+            "failed_output": failed_output,
+            "error": partial_error or None,
             "size": size,
             "requested_size": requested_size,
             "edit_size": size if mode == "edit" else None,
