@@ -13,12 +13,21 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 支持 PNG、JPEG、WEBP、GIF 输入；最多 16 张输入图，输出数量按用户请求执行
 - 单次编辑最多可同时使用 16 张参考图片，适合固定人物、服装、构图和风格
 - 支持 2K 与 4K 输出尺寸；可按横图、竖图或正方形选择尺寸
+- 支持生成、编辑、重绘和蒙版局部重绘；原图永不覆盖
+- 支持本地无 API 调用的确定性后处理：精确尺寸、缩放适配、像素裁剪、格式转换和压缩
+- 支持 `cover`、`contain`、`fill`、`inside`、`outside` 五种尺寸适配方式和裁剪位置
+- 支持 PNG、JPEG、WebP、AVIF 输出，以及 `--process-only` 处理已有本地图片
+- 后处理保留未修改的上游原图，并生成 JSON 清单记录每次转换
+- 多图输出逐张保存并立即返回；不会限制用户请求的输出数量
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
 - Masked local repainting with a PNG mask
 - Automatic generate/edit mode selection and local result saving
 - PNG, JPEG, WEBP, and GIF inputs; up to 16 input images and user-requested output count
+- Local deterministic resizing, cropping, format conversion, and compression without another API call
+- `cover`, `contain`, `fill`, `inside`, and `outside` fit modes with adjustable crop position
+- `--process-only` for existing files, preserving the untouched upstream original and writing a JSON manifest
 
 ## 安装 Install
 
@@ -141,6 +150,34 @@ Masked repainting:
 - 2K 示例：`2048x2048`（正方形）、`2048x1152`（横图）或 `1152x2048`（竖图）。
 - 4K 示例：`3840x2160`（横图）或 `2160x3840`（竖图）。
 - 示例：`使用 $Matrixapi-imagegen 参考这 16 张图片，生成一位古装美女站在樱花树下的 4K 竖图，保持人物脸部、服装纹理和整体色调一致。`
+
+### 本地尺寸、裁剪与格式处理
+
+这部分只在本机使用 Pillow 进行像素处理，不会再次请求图片 API，也不会产生新的生图费用。未处理的上游原图会保留，处理结果另存为新文件；原图不会被覆盖。
+
+- `--output-size WIDTHxHEIGHT`：输出精确尺寸，支持不是 16 倍数的本地最终尺寸
+- `--fit cover`：铺满目标画布并裁掉多余部分
+- `--fit contain`：完整保留图片并在画布中留边
+- `--fit fill`：直接拉伸到目标尺寸
+- `--fit inside`：只缩小，不放大，保持完整内容
+- `--fit outside`：保证覆盖目标尺寸，必要时放大后裁剪
+- `--position center|top|bottom|left|right`：调整裁剪或留边位置，也支持 `x,y` 位置
+- `--crop x,y,width,height`：按像素坐标裁剪源图后再处理
+- `--output-format same|png|jpeg|webp|avif`：转换输出格式
+- `--output-quality 1-100`：控制 JPEG、WebP 或 AVIF 压缩质量
+- `--process-only`：只处理已有本地图片，禁止调用上游接口
+
+示例：
+
+```powershell
+# 将已有图片裁剪为 1200x800，不调用上游，输出 WebP
+python "<skill-directory>\\scripts\\generate.py" `
+  --process-only --image "D:\\images\\original.png" `
+  --output-size 1200x800 --fit cover --position center `
+  --output-format webp --output-quality 90
+```
+
+每次本地处理都会在输出目录生成 `postprocess-manifest.json`，记录输入文件、输出文件、尺寸、裁剪、适配方式、格式和质量参数，便于追溯和复现。
 
 底层命令示例：
 
