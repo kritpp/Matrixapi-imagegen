@@ -82,7 +82,7 @@ When the user asks to `更新 Matrixapi-imagegen`, run:
 python <skill-directory>/scripts/update_skill.py
 ```
 
-The updater downloads the latest package from the official GitHub repository, atomically replaces this Skill directory, validates the installed version/configuration, and removes a recognized legacy `api-imagegen` Skill directory. It never deletes or moves historical images under `generated_images/api-imagegen`; new results use `generated_images/Matrixapi-imagegen`. After success, report the installed version, `gpt-image-2` and `gpt-image-2-pro` as supported models, the current model, and the restart requirement from the updater JSON.
+The updater downloads the latest package from the official GitHub repository, atomically replaces this Skill directory, validates the installed version/configuration, and removes a recognized legacy `api-imagegen` Skill directory. It never deletes or moves historical images under `generated_images/api-imagegen`; new results use `generated_images/Matrixapi-imagegen`. After success, **the final response must include the updater JSON `display_message` verbatim** (or reproduce the same fields if that string is unavailable), showing the installed version, current model, both supported models, and the restart requirement. Do not replace this with a generic success-only sentence.
 
 ## Boundaries
 

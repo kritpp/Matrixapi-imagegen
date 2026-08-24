@@ -280,16 +280,23 @@ def main() -> int:
     try:
         legacy_removed = update_skill(args.archive_url, target)
         installed = _installed_check(target)
+        installed_version = installed.get("skill_version")
+        current_model = installed.get("model")
+        supported_models = installed.get("supported_models", list(SUPPORTED_MODELS))
         print(
             json.dumps(
                 {
                     "ok": True,
                     "updated": True,
-                    "installed_version": installed.get("skill_version"),
-                    "current_model": installed.get("model"),
-                    "selected_model": installed.get("model"),
-                    "supported_models": installed.get(
-                        "supported_models", list(SUPPORTED_MODELS)
+                    "installed_version": installed_version,
+                    "current_model": current_model,
+                    "selected_model": current_model,
+                    "supported_models": supported_models,
+                    "display_message": (
+                        f"Matrixapi-imagegen {installed_version} 已更新成功；"
+                        f"当前模型：{current_model}；"
+                        f"支持模型：{', '.join(str(item) for item in supported_models)}；"
+                        "请重启 Codex。"
                     ),
                     "legacy_skill_removed": legacy_removed,
                     "restart_required": True,
