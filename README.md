@@ -24,7 +24,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.3.3.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会完整替换 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。识别到旧版 `api-imagegen` 技能代码时会将其移除，但不会删除 `generated_images\api-imagegen` 中的历史图片。
+下载本仓库中的 `Matrixapi-imagegen-v1.4.0.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会完整替换 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。识别到旧版 `api-imagegen` 技能代码时会将其移除，但不会删除 `generated_images\api-imagegen` 中的历史图片。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,17 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.3.3`。输出总数不设技能侧上限；多图在一个本地命令内逐张请求、逐张保存并立即发出预览事件，避免一次批量超时丢失全部结果。默认单张等待提高到 600 秒。自动更新会完整替换技能、报告两个支持模型并安全清理旧技能代码，新图片改存到 `generated_images/Matrixapi-imagegen`，历史图片保持原位。
+当前版本：`1.4.0`。输出总数不设技能侧上限；多图在一个本地命令内逐张请求、逐张保存并立即发出预览事件，避免一次批量超时丢失全部结果。默认单张等待为 600 秒；6 张以上或 48 MiB 以上参考图自动使用异步任务并轮询状态，支持原生 4K 竖版和本地缩放、裁剪、格式转换。自动更新会完整替换技能、报告安装版本、当前模型及支持模型并安全清理旧技能代码，新图片改存到 `generated_images/Matrixapi-imagegen`，历史图片保持原位。
 
-Current version: `1.3.3`. The Skill imposes no total output cap. Multi-output jobs run sequential single-image calls inside one local command, save each result immediately, and emit an immediate preview event so a later failure cannot discard earlier files. The default per-image timeout is now 600 seconds. Updates fully replace the current Skill, report both supported models, safely remove recognized legacy Skill code, and write new results under `generated_images/Matrixapi-imagegen` without moving historical images.
+Current version: `1.4.0`. The Skill imposes no total output cap. Multi-output jobs run sequential single-image calls inside one local command, save each result immediately, and emit an immediate preview event so a later failure cannot discard earlier files. The default per-image timeout is 600 seconds; large reference sets automatically use asynchronous task/status polling, with native portrait 4K and local resize, crop, and format conversion. Updates fully replace the current Skill, report the installed version, current model, and supported models, safely remove recognized legacy Skill code, and write new results under `generated_images/Matrixapi-imagegen` without moving historical images.
+
+### 1.4.0
+
+- 支持最多 16 张参考图；参考图达到 6 张或 48 MiB 时自动使用异步任务并轮询状态，整组参考图只提交一次。
+- 支持最长边 3840px、总像素 14.7MP 的 4K 竖版请求；输出数量不设技能侧上限。
+- 成功保存一张就立即输出预览事件；后续图片逐张继续，单张失败只重试该张，不重复已成功请求。
+- 自动更新输出安装版本、当前模型和支持模型，并使用有上限的网络等待，避免长时间无反馈。
+- 新增本地 `process-only` 缩放、裁剪、格式转换和压缩，不重新调用上游、不覆盖原图。
 
 ### 1.3.3
 

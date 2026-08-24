@@ -11,7 +11,7 @@ Generate or edit images with the bundled script and show the saved result to the
 
 1. Resolve `scripts/generate.py` relative to this `SKILL.md` file.
 2. Turn the user's request into a complete image prompt. Preserve requested subject, composition, style, lighting, colors, text, and constraints. Do not invent identifying details. When the user supplies local images, use only the exact attachment paths exposed by the current user message, in attachment order, and pass every one as a separate `--image`. Never scan a temp, clipboard, Downloads, workspace, or generated-images directory to discover or guess input images, and never substitute an image from an earlier message or task. Pass a supplied mask as `--mask`.
-3. Choose the requested size, or use `1024x1024` when none is given. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for landscape 2K, `3840x2160` for landscape 4K, and `2160x3840` for portrait 4K. Both edges must be multiples of 16, the longest edge must not exceed 3840 pixels or three times the shorter edge, and total pixels must be between 655,360 and 8,294,400.
+3. Choose the requested size, or use `1024x1024` when none is given. Common larger sizes are `2048x2048` for square 2K, `2048x1152` for landscape 2K, `3840x2160` for landscape 4K, and `2160x3840` for portrait 4K. Both edges must be multiples of 16, the longest edge must not exceed 3840 pixels or three times the shorter edge, and total pixels must be between 655,360 and 14,745,600. Native GPT Image 2 4K edits are preserved.
 4. Choose the request mode automatically: no `--image` uses `/v1/images/generations`; one or more `--image` files uses multipart `/v1/images/edits`; `--mask` is optional for edit/inpaint requests. Repeat `--image` for multiple reference images, up to sixteen. Send the requested size unchanged for edits, including 1K, 2K, and 4K sizes; the provider decides whether that size is supported and may return an error. The original input file is never overwritten.
    For current-message attachments, count the attachment paths before running anything and add `--expected-images <count>` to the single edit command. This count must equal the number of images attached to that user message. If any current attachment path is unavailable, stop with the missing count instead of scanning directories, silently submitting fewer images, or asking the image API to generate from an incomplete set. Do not run separate shell commands to enumerate, locate, compare, hash, or inspect attachment files; the generation script validates the exact paths once before contacting the API.
    When the user requests high quality, HD, a final-quality render, `高清`, or `高质量`, include `--quality high` on the single generation/edit command. Do not silently replace it with `standard` or omit it. Leave quality unset only when the user did not request a quality level.
@@ -27,7 +27,7 @@ Generate or edit images with the bundled script and show the saved result to the
    python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --expected-images <attachment-count> --image "<path-1>" --image "<path-2>" --n 1
    ```
 
-   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests a different total output count. The Skill does not impose an output-count maximum. It fulfills a multi-output request as sequential single-image API calls inside this one command, saving every successful image before starting the next so one later failure cannot discard earlier files.
+   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests a different total output count. For a large local GPT Image 2 edit (6 or more references or at least 48 MiB), the script automatically submits one asynchronous task and polls its status; it never splits the reference set into separate image requests. A story sequence is handled as separate scene tasks, with each completed original explicitly passed to the next scene.
    Run this script exactly once for the task. If the command tool reports that the
    process is still running, resume or wait on that same command session until it
    exits. A running process with no stdout is not a failed request. Do not start a
@@ -45,7 +45,7 @@ Generate or edit images with the bundled script and show the saved result to the
    Resolution labels use the output's longest edge: `4K` at 3840px or above, `2K` at 2048px or above, otherwise `1K`.
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
 
-   Require `ok: true`, a matching `request_id`, a non-empty `execution_id`, and a usable preview path. An `image_saved` event is a validated partial result, not permission to start another command. Treat the final `event: complete` line as completion. If it reports `partial: true`, keep and display all completed images, report which output failed, and do not retry unless the user explicitly asks. Do not run any directory scan, sort, process check, dimension recheck, marker wait, or extra command after the final event. Never choose a file from an earlier request. A command that is still running can never trigger a retry. These rules apply equally to new images, edits, redraws, and second-pass modifications.
+   Require `ok: true`, a matching `request_id`, a non-empty `execution_id`, and a usable preview path. Render each `image_saved` event immediately, including for the first output, then silently continue the same command session. Do not start another command or add progress narration. Treat `event: complete` as the final signal. If it reports `partial: true`, keep and display all completed images and report only the failed scene/output; never retry a billed task automatically. Do not run any directory scan, sort, process check, dimension recheck, marker wait, or extra command after a result event. Never choose a file from an earlier request. A command that is still running can never trigger a retry. These rules apply equally to new images, edits, redraws, and second-pass modifications.
 7. If generation or editing fails, report the sanitized error. Report the requested and actual saved size from the JSON fields. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
 ## Configuration
@@ -59,7 +59,7 @@ The script discovers credentials in this order:
 2. `OPENAI_API_KEY` and `OPENAI_BASE_URL`, only when the URL is the fixed API address.
 3. The current Codex provider selected in CC Switch, only when it points to the fixed API address.
 
-The API must implement `POST /v1/images/generations` for new images and `POST /v1/images/edits` with multipart `image`/optional `mask` fields for editing. Responses may return either `data[].url` or `data[].b64_json`. Supported models are `gpt-image-2` and `gpt-image-2-pro`; the default is `gpt-image-2`. Set `IMAGEGEN_MODEL=gpt-image-2-pro` to use Pro.
+The API must implement `POST /v1/images/generations` for new images and `POST /v1/images/edits` with multipart `image`/optional `mask` fields for editing. Large local GPT Image 2 edits additionally use `async=true` and `GET /v1/status/{task_id}`. Responses may return either `data[].url` or `data[].b64_json`. Supported models are `gpt-image-2` and `gpt-image-2-pro`; the default is `gpt-image-2`. Set `IMAGEGEN_MODEL=gpt-image-2-pro` to use Pro.
 
 To diagnose setup without generating or charging for an image, run:
 
@@ -69,6 +69,10 @@ python <skill-directory>/scripts/generate.py --check-config
 
 The check reports only whether a supported configuration was found, its generic source type, the current model, both supported models, and the exact Skill version. Do not print the provider name, endpoint, or credential.
 It also reports `skill_version`, which is the authoritative installed version; do not infer the version from a folder name or an old log entry.
+
+## Local size and crop processing
+
+When an exact final size, crop, format, or compression is requested, use the local deterministic processing options after the upstream result. Preserve the untouched upstream file separately and never make another image API request for these pixel-only operations. The package supports `--output-size`, `--fit cover|contain|fill|inside|outside`, `--position`, `--crop`, `--output-format`, `--output-quality`, and `--process-only` for existing local files.
 
 ## Updating the Skill
 

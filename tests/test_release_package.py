@@ -17,6 +17,7 @@ EXPECTED_PACKAGE_FILES = {
     "skills/Matrixapi-imagegen/SKILL.md",
     "skills/Matrixapi-imagegen/agents/openai.yaml",
     "skills/Matrixapi-imagegen/scripts/generate.py",
+    "skills/Matrixapi-imagegen/scripts/postprocess.py",
     "skills/Matrixapi-imagegen/scripts/update_skill.py",
 }
 

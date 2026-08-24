@@ -29,10 +29,13 @@ PACKAGE_NAME_PATTERN = re.compile(
 MAX_ARCHIVE_BYTES = 40 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 120 * 1024 * 1024
 MAX_ARCHIVE_FILES = 500
+LIST_TIMEOUT_SECONDS = 8
+DOWNLOAD_TIMEOUT_SECONDS = 30
 SKILL_RELATIVE_PATH = ("skills", "Matrixapi-imagegen")
 REQUIRED_FILES = (
     "SKILL.md",
     "scripts/generate.py",
+    "scripts/postprocess.py",
     "agents/openai.yaml",
 )
 LEGACY_SKILL_NAME = "api-imagegen"
@@ -49,9 +52,9 @@ def _resolve_archive_url() -> str:
         headers={"Accept": "application/vnd.github+json", "User-Agent": "Matrixapi-imagegen-updater/1.0"},
     )
     last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=LIST_TIMEOUT_SECONDS) as response:
                 payload = response.read(1024 * 1024 + 1)
             if len(payload) > 1024 * 1024:
                 raise UpdateError("The GitHub package listing is unexpectedly large")
@@ -67,9 +70,9 @@ def _resolve_archive_url() -> str:
             return max(candidates)[1]
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError) as exc:
             last_error = exc
-            if attempt < 2:
-                time.sleep(1 << attempt)
-    raise UpdateError(f"Unable to find the latest Skill after 3 attempts: {last_error}") from last_error
+            if attempt < 1:
+                time.sleep(0.5)
+    raise UpdateError(f"Unable to find the latest Skill after 2 attempts: {last_error}") from last_error
 
 
 def _safe_member_path(name: str) -> tuple[str, ...]:
@@ -96,17 +99,17 @@ def _download_archive(url: str) -> bytes:
         headers={"Accept": "application/zip", "User-Agent": "Matrixapi-imagegen-updater/1.0"},
     )
     last_error: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
                 data = response.read(MAX_ARCHIVE_BYTES + 1)
             break
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = exc
-            if attempt < 2:
-                time.sleep(1 << attempt)
+            if attempt < 1:
+                time.sleep(0.5)
     else:
-        raise UpdateError(f"Unable to download the latest Skill after 3 attempts: {last_error}") from last_error
+        raise UpdateError(f"Unable to download the latest Skill after 2 attempts: {last_error}") from last_error
     if len(data) > MAX_ARCHIVE_BYTES:
         raise UpdateError("The update archive is larger than the local safety limit")
     return data
@@ -284,6 +287,7 @@ def main() -> int:
                     "updated": True,
                     "installed_version": installed.get("skill_version"),
                     "current_model": installed.get("model"),
+                    "selected_model": installed.get("model"),
                     "supported_models": installed.get(
                         "supported_models", list(SUPPORTED_MODELS)
                     ),

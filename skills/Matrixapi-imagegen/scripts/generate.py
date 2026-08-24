@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import json
 import mimetypes
 import os
@@ -20,6 +21,12 @@ import urllib.parse
 import urllib.request
 import uuid
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from postprocess import PostprocessError, parse_output_size, process_many
+except ImportError:  # pragma: no cover
+    from .postprocess import PostprocessError, parse_output_size, process_many
+
 
 DEFAULT_MODEL = "gpt-image-2"
 DEFAULT_BASE_URL = "https://eos.manyuvip.com"
@@ -28,11 +35,16 @@ MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_EDGE = 3840
 MIN_PIXELS = 655_360
-MAX_PIXELS = 8_294_400
+MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.3.3"
+SKILL_VERSION = "1.4.0"
+PROMPT_MAX_CHARS = 1024
+PROMPT_COMPACT_TARGET = 1000
+EDIT_MAX_EDGE = 1792
+AUTO_ASYNC_REFERENCE_COUNT = 6
+AUTO_ASYNC_REFERENCE_BYTES = 48 * 1024 * 1024
 
 
 class ImageGenError(RuntimeError):
@@ -232,6 +244,41 @@ def edit_working_size(size: str) -> str:
     return validate_size(size)
 
 
+def compact_prompt(prompt: str) -> tuple[str, bool]:
+    """Keep prompts within the upstream limit without a second billed request."""
+    if len(prompt) <= PROMPT_MAX_CHARS:
+        return prompt, False
+    target = min(PROMPT_COMPACT_TARGET, PROMPT_MAX_CHARS)
+    head = max(16, int(target * 0.72))
+    tail = max(16, target - head)
+    compacted = f"{prompt[:head].rstrip()}\n{prompt[-tail:].lstrip()}"
+    return compacted[:PROMPT_MAX_CHARS], True
+
+
+def request_fingerprint(
+    prompt: str,
+    model: str,
+    size: str,
+    mode: str,
+    quality: str,
+    image_paths: list[str],
+    mask_path: str | None,
+) -> str:
+    digest = hashlib.sha256()
+    for value in (prompt, model, size, mode, quality or ""):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    for path in image_paths + ([mask_path] if mask_path else []):
+        if not path:
+            continue
+        digest.update(str(Path(path).expanduser().resolve()).encode("utf-8"))
+        digest.update(b"\0")
+        with Path(path).expanduser().open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _read_limited(response: Any, limit: int) -> bytes:
     data = response.read(limit + 1)
     if len(data) > limit:
@@ -247,13 +294,36 @@ def _safe_http_detail(exc: urllib.error.HTTPError, key: str) -> str:
 
 
 def _parse_api_response(raw: bytes) -> dict[str, Any]:
+    text = raw.decode("utf-8", errors="replace").strip()
+    if "data:" in text:
+        latest: dict[str, Any] | None = None
+        for line in text.splitlines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                latest = event
+        if latest is not None:
+            if latest.get("url") and not latest.get("data"):
+                latest["data"] = [{"url": latest["url"]}]
+            return latest
     try:
-        result = json.loads(raw)
+        result = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ImageGenError("Image API returned invalid JSON") from exc
-    if not isinstance(result, dict) or not isinstance(result.get("data"), list):
-        raise ImageGenError("Image API returned no image data")
-    if not result["data"]:
+    if not isinstance(result, dict):
+        raise ImageGenError("Image API returned an invalid JSON object")
+    if not result.get("data") and isinstance(result.get("results"), list):
+        result["data"] = result["results"]
+    if not result.get("data") and result.get("url"):
+        result["data"] = [{"url": result["url"]}]
+    if not result.get("data") and not (result.get("id") or result.get("task_id")):
         raise ImageGenError("Image API returned no image data")
     return result
 
@@ -311,16 +381,25 @@ def call_api(
     count: int,
     timeout: int,
     options: dict[str, str] | None = None,
+    aspect_ratio: str = "",
+    image_urls: list[str] | None = None,
+    async_mode: bool = False,
 ) -> dict[str, Any]:
     """Call the JSON generations endpoint."""
     payload: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
         "size": size,
-        "n": count,
     }
+    if count != 1:
+        payload["n"] = count
     if options:
         payload.update(options)
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
+    if image_urls:
+        payload["images"] = image_urls
+    payload["async"] = async_mode
     return _post_image_request(
         endpoint,
         key,
@@ -371,6 +450,30 @@ def _input_mime(data: bytes, path: Path) -> str:
     raise ImageGenError(
         f"{path} is not a supported image; use PNG, JPEG, WEBP, or GIF"
     )
+
+
+def _input_image_bytes(image_paths: list[str], mask_path: str | None = None) -> int:
+    total = 0
+    for path in image_paths + ([mask_path] if mask_path else []):
+        if not path:
+            continue
+        total += len(_input_image(path, "Input image")[2])
+    return total
+
+
+def should_auto_async_local_edit(
+    size: str,
+    model: str,
+    image_count: int,
+    input_bytes: int,
+    has_mask: bool,
+) -> bool:
+    if model not in SUPPORTED_MODELS or has_mask:
+        return False
+    width, height = (int(value) for value in size.split("x"))
+    if max(width, height) <= EDIT_MAX_EDGE:
+        return False
+    return image_count >= AUTO_ASYNC_REFERENCE_COUNT or input_bytes >= AUTO_ASYNC_REFERENCE_BYTES
 
 
 def _multipart_body(
@@ -634,6 +737,52 @@ def _write_sidecar(path: Path, payload: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _status_endpoint(endpoint: str, task_id: str) -> str:
+    parsed = urllib.parse.urlparse(endpoint)
+    path = parsed.path
+    marker = "/images/generations"
+    if marker in path:
+        path = path.split(marker, 1)[0] + f"/status/{urllib.parse.quote(task_id, safe='')}"
+    else:
+        path = path.rstrip("/") + f"/status/{urllib.parse.quote(task_id, safe='')}"
+    return urllib.parse.urlunparse(parsed._replace(path=path, query="", fragment=""))
+
+
+def _get_image_request(endpoint: str, key: str, timeout: int) -> dict[str, Any]:
+    request = urllib.request.Request(
+        endpoint,
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json", "User-Agent": f"Matrixapi-imagegen-skill/{SKILL_VERSION}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return _parse_api_response(_read_limited(response, MAX_RESPONSE_BYTES))
+    except urllib.error.HTTPError as exc:
+        raise ImageGenError(f"Image status request failed with HTTP {exc.code}: {_safe_http_detail(exc, key)}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ImageGenError(f"Image status request failed: {exc}") from exc
+
+
+def wait_for_task(result: dict[str, Any], endpoint: str, key: str, timeout: int) -> dict[str, Any]:
+    if result.get("data"):
+        return result
+    task_id = str(result.get("id") or result.get("task_id") or "").strip()
+    if not task_id:
+        raise ImageGenError("Async image API response did not include a task id")
+    deadline = time.monotonic() + timeout
+    status_url = _status_endpoint(endpoint, task_id)
+    while time.monotonic() < deadline:
+        latest = _get_image_request(status_url, key, min(60, max(10, timeout)))
+        status = str(latest.get("status") or "").lower()
+        if status in {"succeeded", "completed"} or (latest.get("data") and not status):
+            return latest
+        if status in {"failed", "error", "cancelled"}:
+            reason = latest.get("failure_reason") or latest.get("error") or status
+            raise ImageGenError(f"Async image task failed: {reason}")
+        time.sleep(3)
+    raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
+
+
 def _hide_sidecar(path: Path) -> None:
     """Hide task sidecars in Windows Explorer without changing their paths."""
     if os.name != "nt":
@@ -657,7 +806,7 @@ def _hide_sidecar(path: Path) -> None:
 
 
 def _load_ready_result(
-    path: Path, request_id: str, execution_id: str
+    path: Path, request_id: str, execution_id: str, fingerprint: str = ""
 ) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -669,6 +818,7 @@ def _load_ready_result(
         or payload.get("ok") is not True
         or payload.get("request_id") != request_id
         or payload.get("execution_id") != execution_id
+        or (fingerprint and payload.get("request_fingerprint") != fingerprint)
         or not isinstance(preview_files, list)
         or not preview_files
         or any(not isinstance(path_value, str) or not Path(path_value).is_file() for path_value in preview_files)
@@ -700,6 +850,7 @@ def _reserve_request(
     request_id: str,
     allow_repeat: bool,
     timeout: int,
+    fingerprint: str = "",
 ) -> tuple[Path | None, str, dict[str, Any] | None]:
     """Reserve a task before the API call and reuse an overlapping task's result."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -713,7 +864,7 @@ def _reserve_request(
         if observed_execution_id and ready.is_file():
             try:
                 result = _load_ready_result(
-                    ready, request_id, observed_execution_id
+                    ready, request_id, observed_execution_id, fingerprint
                 )
             except ImageGenError:
                 result = None
@@ -754,6 +905,7 @@ def _reserve_request(
                     "request_id": request_id,
                     "execution_id": execution_id,
                     "skill_version": SKILL_VERSION,
+                    "request_fingerprint": fingerprint,
                     "expires_at": time.time() + reservation_seconds,
                 },
                 handle,
@@ -773,7 +925,7 @@ def _release_request(running: Path) -> None:
 
 
 def _refresh_request_reservation(
-    running: Path, request_id: str, execution_id: str, timeout: int
+    running: Path, request_id: str, execution_id: str, timeout: int, fingerprint: str = ""
 ) -> None:
     """Keep a long multi-output task reserved while each image is processed."""
     _write_sidecar(
@@ -782,6 +934,7 @@ def _refresh_request_reservation(
             "request_id": request_id,
             "execution_id": execution_id,
             "skill_version": SKILL_VERSION,
+            "request_fingerprint": fingerprint,
             "expires_at": time.time() + timeout * 2 + 60,
         },
     )
@@ -817,12 +970,22 @@ def parse_args() -> argparse.Namespace:
         help="Request mode; auto selects edit when --image is supplied",
     )
     parser.add_argument("--size", default="1024x1024")
+    parser.add_argument("--aspect-ratio", default="")
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality")
     parser.add_argument("--background")
     parser.add_argument("--input-fidelity")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--async", dest="async_mode", action="store_true")
+    parser.add_argument("--process-only", action="store_true")
+    parser.add_argument("--output-size")
+    parser.add_argument("--fit", choices=("cover", "contain", "fill", "inside", "outside"), default="cover")
+    parser.add_argument("--position", default="center")
+    parser.add_argument("--crop")
+    parser.add_argument("--output-format", choices=("same", "png", "jpeg", "jpg", "webp", "avif"), default="same")
+    parser.add_argument("--output-quality", type=int)
+    parser.add_argument("--output-background")
     parser.add_argument(
         "--request-id",
         help="Caller-owned task identifier used to bind output to this request",
@@ -841,6 +1004,30 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = parse_args()
     try:
+        if args.process_only:
+            image_paths = list(args.images or [])
+            if not image_paths:
+                raise ImageGenError("--process-only requires at least one --image file")
+            if not (args.output_size or args.crop or args.output_format != "same" or args.output_quality is not None or args.output_background):
+                raise ImageGenError("--process-only requires a local output or crop option")
+            try:
+                processed = process_many(
+                    image_paths,
+                    args.out_dir or (Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen" / "processed"),
+                    output_size=args.output_size,
+                    fit=args.fit,
+                    position=args.position,
+                    crop=args.crop,
+                    output_format=args.output_format,
+                    quality=args.output_quality or 90,
+                    background_color=args.output_background,
+                )
+            except PostprocessError as exc:
+                raise ImageGenError(str(exc)) from exc
+            outputs = [item["output"] for item in processed]
+            payload = {"ok": True, "event": "complete", "mode": "local-process", "skill_version": SKILL_VERSION, "count": len(outputs), "original_files": preview_paths(image_paths), "processed_files": preview_paths(outputs), "preview_files": preview_paths(outputs), "download_files": preview_paths(outputs)}
+            print(json.dumps(payload, ensure_ascii=False), flush=True)
+            return 0
         request_id = (args.request_id or uuid.uuid4().hex).strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", request_id):
             raise ImageGenError(
@@ -870,9 +1057,10 @@ def main() -> int:
             )
             return 0
 
-        prompt = (args.prompt or "").strip()
-        if not prompt:
+        raw_prompt = (args.prompt or "").strip()
+        if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
+        prompt, prompt_compacted = compact_prompt(raw_prompt)
 
         image_paths = list(args.images or [])
         if args.expected_images is not None:
@@ -897,25 +1085,41 @@ def main() -> int:
             raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
 
         mode = "edit" if image_paths else "generate"
+        aspect_ratio = args.aspect_ratio.strip()
         size = edit_working_size(requested_size) if mode == "edit" else requested_size
+        input_bytes = _input_image_bytes(image_paths, args.mask) if image_paths else 0
+        auto_async = bool(
+            image_paths
+            and should_auto_async_local_edit(
+                size, model, len(image_paths), input_bytes, bool(args.mask)
+            )
+        )
+        async_mode = bool(args.async_mode or auto_async)
+        fingerprint = request_fingerprint(
+            prompt, model, size, mode, args.quality or "", image_paths, args.mask
+        )
         output_dir = args.out_dir or (
             Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
         )
         ready = _ready_marker(output_dir, request_id)
         running, execution_id, existing_result = _reserve_request(
-            output_dir, request_id, args.allow_repeat, args.timeout
+            output_dir, request_id, args.allow_repeat, args.timeout, fingerprint
         )
         if existing_result is not None:
             print(json.dumps(existing_result, ensure_ascii=False), flush=True)
             return 0
         options = _option_fields(args.quality, args.background, args.input_fidelity)
+        if aspect_ratio:
+            options["aspect_ratio"] = aspect_ratio
+        if async_mode:
+            options["async"] = "true"
         files: list[str] = []
         image_info: list[dict[str, int | str]] = []
         partial_error = ""
         failed_output = None
         for output_index in range(1, args.n + 1):
             _refresh_request_reservation(
-                running, request_id, execution_id, args.timeout
+                running, request_id, execution_id, args.timeout, fingerprint
             )
             try:
                 if mode == "edit":
@@ -931,6 +1135,8 @@ def main() -> int:
                         args.timeout,
                         options,
                     )
+                    if async_mode:
+                        result = wait_for_task(result, generation_url, key, args.timeout)
                 else:
                     result = call_api(
                         generation_url,
@@ -941,7 +1147,11 @@ def main() -> int:
                         1,
                         args.timeout,
                         options,
+                        aspect_ratio=aspect_ratio,
+                        async_mode=async_mode,
                     )
+                    if async_mode:
+                        result = wait_for_task(result, generation_url, key, args.timeout)
                 one_result = dict(result)
                 one_result["data"] = result["data"][:1]
                 saved_files, saved_info = save_images(
@@ -979,14 +1189,40 @@ def main() -> int:
                     ),
                     flush=True,
                 )
-        preview_files = preview_paths(files)
-        download_files = preview_files.copy()
+        original_files = preview_paths(files)
+        processed_files = original_files.copy()
+        postprocess_requested = bool(
+            args.output_size
+            or args.crop
+            or args.output_format != "same"
+            or args.output_quality is not None
+            or args.output_background
+        )
+        if postprocess_requested and files:
+            try:
+                processed = process_many(
+                    files,
+                    args.out_dir or (output_dir / "processed"),
+                    output_size=args.output_size,
+                    fit=args.fit,
+                    position=args.position,
+                    crop=args.crop,
+                    output_format=args.output_format,
+                    quality=args.output_quality or 90,
+                    background_color=args.output_background,
+                )
+                processed_files = preview_paths([item["output"] for item in processed])
+            except PostprocessError as exc:
+                partial_error = str(exc)
+        preview_files = processed_files
+        download_files = processed_files.copy()
         result_payload = {
             "ok": True,
             "event": "complete",
             "complete": not partial_error,
             "request_id": request_id,
             "execution_id": execution_id,
+            "request_fingerprint": fingerprint,
             "mode": mode,
             "model": model,
             "skill_version": SKILL_VERSION,
@@ -1001,8 +1237,14 @@ def main() -> int:
             "edit_size": size if mode == "edit" else None,
             "resized_for_edit": mode == "edit" and size != requested_size,
             "input_images": len(image_paths),
+            "input_bytes": input_bytes,
+            "prompt_compacted": prompt_compacted,
+            "async": async_mode,
+            "async_auto": auto_async,
             "mask": bool(args.mask),
             "files": files,
+            "original_files": original_files,
+            "processed_files": processed_files,
             "preview_files": preview_files,
             "download_files": download_files,
             "image_info": image_info,
