@@ -29,9 +29,9 @@ MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_EDGE = 3840
 MIN_PIXELS = 655_360
 MAX_PIXELS = 8_294_400
-MAX_INPUT_IMAGES = 15
+MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-SKILL_VERSION = "1.2.9"
+SKILL_VERSION = "1.3.0"
 
 
 class ImageGenError(RuntimeError):
@@ -913,6 +913,7 @@ def main() -> int:
             "mode": mode,
             "model": model,
             "skill_version": SKILL_VERSION,
+            "quality": args.quality.strip() if args.quality else None,
             "count": len(files),
             "size": size,
             "requested_size": requested_size,

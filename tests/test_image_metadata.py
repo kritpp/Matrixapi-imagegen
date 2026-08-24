@@ -209,7 +209,63 @@ class ImageMetadataTests(unittest.TestCase):
         ):
             self.assertEqual(MODULE.main(), 0)
 
-        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.2.9")
+        self.assertEqual(json.loads(stdout.getvalue())["skill_version"], "1.3.0")
+
+    def test_high_quality_is_sent_once_and_reported(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            image_path = output_path / "image-high.png"
+            image_path.write_bytes(b"validated image")
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "high-quality-task",
+                "--prompt",
+                "a detailed poster",
+                "--quality",
+                "high",
+                "--out-dir",
+                str(output_path),
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
+                ),
+                mock.patch.object(MODULE, "call_api", return_value={"data": [{}]}) as call_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    return_value=([str(image_path)], [{"width": 1024, "height": 1024, "format": "PNG", "resolution": "1K"}]),
+                ),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            call_api.assert_called_once()
+            self.assertEqual(call_api.call_args.args[-1], {"quality": "high"})
+            self.assertEqual(json.loads(stdout.getvalue())["quality"], "high")
+
+    def test_accepts_sixteen_reference_images(self):
+        image_paths = [f"reference-{index}.png" for index in range(16)]
+        with mock.patch.object(MODULE, "_input_image", return_value=("reference.png", "image/png", b"image")):
+            with mock.patch.object(MODULE, "_post_image_request", return_value={"data": [{}]}) as post_request:
+                MODULE.call_edit_api(
+                    "https://eos.manyuvip.com/v1/images/edits",
+                    "test-key",
+                    "gpt-image-2",
+                    "combine references",
+                    "1024x1024",
+                    1,
+                    image_paths,
+                    None,
+                    10,
+                )
+
+        post_request.assert_called_once()
 
     def test_success_publishes_one_ready_sidecar_without_cleanup_markers(self):
         with TemporaryDirectory() as output_dir:

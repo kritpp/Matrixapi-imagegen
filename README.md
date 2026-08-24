@@ -11,20 +11,20 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 使用 PNG 蒙版进行局部重绘
 - 自动选择生成或编辑模式，并保存结果到本机
 - 编辑请求保留用户指定的 1K、2K 或 4K 尺寸，由上游接口决定是否支持
-- 支持 PNG、JPEG、WEBP、GIF 输入；最多 15 张输入图，最多 4 个结果
+- 支持 PNG、JPEG、WEBP、GIF 输入；最多 16 张输入图，最多 4 个结果
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
 - Masked local repainting with a PNG mask
 - Automatic generate/edit mode selection and local result saving
 - Edit requests preserve the requested 1K, 2K, or 4K size; the provider decides whether it is supported
-- PNG, JPEG, WEBP, and GIF inputs; up to 15 input images and 4 outputs
+- PNG, JPEG, WEBP, and GIF inputs; up to 16 input images and 4 outputs
 
 ## 安装 Install
 
 ### 一键安装（推荐）
 
-下载本仓库中的 `Matrixapi-imagegen-v1.2.9.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
+下载本仓库中的 `Matrixapi-imagegen-v1.3.0.zip`，解压后双击压缩包根目录里的 `install-windows.bat`（Windows）或 `install-macos.command`（macOS）。安装脚本会把 Skill 写入 Codex 默认的 `C:\Users\当前用户名\.codex\skills\Matrixapi-imagegen`，并配置固定接口地址和模型；压缩包放在哪个磁盘都不会改变安装位置。
 
 ### Codex 拉取安装
 
@@ -134,9 +134,14 @@ This Skill only allows the `eos.manyuvip.com` host and does not silently use ano
 
 ## 发布版本 Release
 
-当前版本：`1.2.9`。本版本按实际执行批次绑定结果：只有在首个命令仍运行时已经重叠启动的同任务进程，才能复用该批次的结果；首个命令退出后的任何新执行都会重新生成，即使任务 ID 相同，也不会展示旧图。自动更新器同时兼容合法的 `./` ZIP 路径。图片保存后仍立即输出成功 JSON，不增加目录扫描或额外收尾检查。
+当前版本：`1.3.0`。本版本支持最多 16 张参考图，并保留按实际执行批次绑定结果：只有在首个命令仍运行时已经重叠启动的同任务进程，才能复用该批次的结果；首个命令退出后的任何新执行都会重新生成，即使任务 ID 相同，也不会展示旧图。自动更新器同时兼容合法的 `./` ZIP 路径。图片保存后仍立即输出成功 JSON，不增加目录扫描或额外收尾检查。
 
-Current version: `1.2.9`. Results are bound to the active execution: only a process that overlaps the still-running original task can reuse its exact result. Any later invocation generates a new image even when the task ID is reused. The updater also accepts legitimate ZIP entries beginning with `./`, without adding image API calls or post-success scans.
+Current version: `1.3.0`. This release accepts up to 16 reference images and keeps results bound to the active execution: only a process that overlaps the still-running original task can reuse its exact result. Any later invocation generates a new image even when the task ID is reused. The updater also accepts legitimate ZIP entries beginning with `./`, without adding image API calls or post-success scans.
+
+### 1.3.0
+
+- 参考图上限从 15 张提高到 16 张；用户明确要求高清时保留并发送 `quality=high`。
+- Reference-image limit increased from 15 to 16; explicit high-quality requests preserve and send `quality=high`.
 
 ### 1.2.9
 
