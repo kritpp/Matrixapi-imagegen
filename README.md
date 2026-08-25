@@ -19,6 +19,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 支持 PNG、JPEG、WebP、AVIF 输出，以及 `--process-only` 处理已有本地图片
 - 后处理保留未修改的上游原图，并生成 JSON 清单记录每次转换
 - 多图输出逐张保存并立即返回；不会限制用户请求的输出数量
+- 连续故事按页面使用独立提示词顺序生成，上一页完成立即返回；任一页失败即停止且不自动重复扣费
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
@@ -35,7 +36,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 点击下面的链接即可直接从 GitHub 下载最新安装包：
 
-[**一键下载 Matrixapi-imagegen v1.8.11 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.11.zip)
+[**一键下载 Matrixapi-imagegen v1.8.12 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.12.zip)
 
 下载后解压，Windows 双击 `install-windows.bat`；macOS 双击 `install-macos.command`。
 
@@ -125,6 +126,8 @@ Natural language prompts usually trigger the Skill automatically. Explicit invoc
 Skill 会从本仓库获取最新版，替换自身文件并保留本机 API 配置。更新完成后重启 Codex；在新对话中重新调用一次 `$Matrixapi-imagegen` 即可。更新不使用系统 `$skill-installer`，因为系统安装器遇到同名目录会停止而不会覆盖。
 
 普通请求使用快速路径，不做 OCR、自动重试或额外检查。只有明确输入“精准文字”或“精准重绘”时，Skill 才启用更高质量和更高参考图保真度参数；这些模式可能更慢。
+
+连续漫画、故事或分镜会在同一命令中为每一张图传入独立的 `--output-prompt`。共享部分只保留人物、服装、画风、场景和时间顺序，不会把全部页面内容重复塞入每一张图。每张图仍以 `n=1` 单独提交；某一张失败后停止后续提交，成功图片保留，且不会自动重试产生费用。
 
 生成成功后，Skill 会检查实际图片文件，并显示真实尺寸、文件格式、图片预览和本地保存路径。原图链接会按真实尺寸显示为“点击打开或下载 1K 原图”“点击打开或下载 2K 原图”或“点击打开或下载 4K 原图”。
 

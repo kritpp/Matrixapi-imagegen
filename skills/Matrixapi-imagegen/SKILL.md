@@ -15,7 +15,7 @@ Generate or edit images with the bundled script and show the saved result to the
 4. Choose the request mode automatically: no `--image` uses `/v1/images/generations`; one or more `--image` files uses multipart `/v1/images/edits`; `--mask` is optional for edit/inpaint requests. Repeat `--image` for multiple reference images, up to sixteen. Send the requested size unchanged for edits, including 1K, 2K, and 4K sizes; the provider decides whether that size is supported and may return an error. The original input file is never overwritten.
    For current-message attachments, count the attachment paths before running anything and add `--expected-images <count>` to the single edit command. This count must equal the number of images attached to that user message. If any current attachment path is unavailable, stop with the missing count instead of scanning directories, silently submitting fewer images, or asking the image API to generate from an incomplete set. Do not run separate shell commands to enumerate, locate, compare, hash, or inspect attachment files; the generation script validates the exact paths once before contacting the API.
    When the user requests high quality, HD, a final-quality render, `高清`, or `高质量`, include `--quality high` on the single generation/edit command. Do not silently replace it with `standard` or omit it. Leave quality unset only when the user did not request a quality level.
-5. Run a generation with one unique task ID for the whole user request:
+5. Once the prompt and any attachment paths are known, run the generation command immediately. Do not narrate a plan, split the request across extra command invocations, or add a preparatory inspection command. Use one unique task ID for the whole user request:
 
    ```text
    python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<prompt>" --size <WIDTHxHEIGHT> --n 1
@@ -27,7 +27,13 @@ Generate or edit images with the bundled script and show the saved result to the
    python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --expected-images <attachment-count> --image "<path-1>" --image "<path-2>" --n 1
    ```
 
-   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests a different total output count. For a large local GPT Image 2 edit (6 or more references or at least 48 MiB), the script automatically submits one asynchronous task and polls its status; it never splits the reference set into separate image requests. A story sequence is handled as separate scene tasks, with each completed original explicitly passed to the next scene. When reusing the immediately preceding result, pass its exact path as `--image`; do not run a command to locate that path. If that result contains multiple images, require an explicit image number or exact result reference before editing.
+   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests a different total output count. For ordinary variants that intentionally share one prompt, use `--prompt "<prompt>" --n <count>`. For an ordered story, comic, storyboard, or any request whose outputs contain different events, never place every page or scene into one prompt and never reuse that full sequence prompt for each output. Instead, prepare a short shared continuity description plus exactly one complete prompt per output and pass them in order in the same command:
+
+   ```text
+   python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<shared characters, style, setting, and chronology only>" --output-prompt "<page 1 only>" --output-prompt "<page 2 only>" --output-prompt "<page 3 only>" --size <WIDTHxHEIGHT>
+   ```
+
+   Do not include another page's events inside an `--output-prompt`. The script submits each output with `n=1`, emits it as soon as it is saved, and then advances to the next distinct prompt. This preserves chronology without compressing the whole sequence into every image. If one output fails, the script stops before submitting later outputs and preserves all earlier files. Never retry that billed output automatically; a later user-requested retry must submit only the failed output prompt with a new task ID. For a large local GPT Image 2 edit (6 or more references or at least 48 MiB), the script automatically submits one asynchronous task and polls its status; it never splits the reference set into separate image requests. All ordered outputs use the same current-request reference set; do not automatically append an earlier generated output as another reference. Reuse a generated image only when the user explicitly asks to edit that exact preceding result. When reusing it, pass its exact path as `--image`; do not run a command to locate that path. If that result contains multiple images, require an explicit image number or exact result reference before editing.
    Run this script exactly once for the task. If the command tool reports that the
    process is still running, resume or wait on that same command session until it
    exits. A running process with no stdout is not a failed request. Do not start a
@@ -50,7 +56,7 @@ Generate or edit images with the bundled script and show the saved result to the
 
 Before sending an image request, the script performs one local safety rewrite of graphic injury language into non-graphic cinematic action wording. It does not add retries, extra validation, directory scans, or additional API calls; the original subject, composition, references, size, and output count remain unchanged.
 
-The installed release is Matrixapi-imagegen 1.8.11. The bundled installer and updater
+The installed release is Matrixapi-imagegen 1.8.12. The bundled installer and updater
 must be shipped with this same version; after an update, restart Codex before starting
 a new image conversation.
 
