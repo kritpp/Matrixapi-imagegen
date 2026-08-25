@@ -765,7 +765,10 @@ def wait_for_task(
                 else str(reason)
             )
             raise ImageGenError(_format_upstream_error(reason_text))
-        time.sleep(3)
+        # Results are delivered as soon as the relay reports completion. A
+        # one-second interval avoids the old multi-second handoff delay while
+        # keeping a single status request in flight.
+        time.sleep(1)
     raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
 
 
