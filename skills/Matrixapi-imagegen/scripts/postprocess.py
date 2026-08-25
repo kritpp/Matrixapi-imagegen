@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic local image post-processing for api-imagegen.
+"""Deterministic local image post-processing for Matrixapi-imagegen.
 
 This module intentionally contains no ML dependency.  It is used for exact
 resizing, cropping, canvas fitting, format conversion, and compression after
@@ -259,7 +259,7 @@ def process_many(paths: list[str], output_dir: str | Path, **kwargs: Any) -> lis
     manifest_path = Path(output_dir).expanduser().resolve() / "postprocess-manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
-        json.dumps({"tool": "api-imagegen-local-postprocess", "items": results}, ensure_ascii=False, indent=2),
+        json.dumps({"tool": "Matrixapi-imagegen-local-postprocess", "items": results}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return results

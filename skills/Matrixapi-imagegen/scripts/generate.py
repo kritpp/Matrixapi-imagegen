@@ -6,13 +6,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import hashlib
 import json
 import mimetypes
 import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 from typing import Any, Iterable
@@ -21,34 +21,134 @@ import urllib.parse
 import urllib.request
 import uuid
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from postprocess import PostprocessError, parse_output_size, process_many
-except ImportError:  # pragma: no cover
+except ImportError:  # pragma: no cover - allows importing this file as a module
     from .postprocess import PostprocessError, parse_output_size, process_many
 
 
 DEFAULT_MODEL = "gpt-image-2"
+SKILL_NAME = "Matrixapi-imagegen"
+SKILL_VERSION = "1.8.8"
 DEFAULT_BASE_URL = "https://eos.manyuvip.com"
 ALLOWED_BASE_HOST = "eos.manyuvip.com"
+RESULT_HIDE_DELAY_MS = 10_000
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
+# Keep multipart uploads below the relay's 256 MiB request limit. The margin
+# leaves room for multipart headers and prevents a proxy from cutting off a
+# large request after the upstream task has already been billed.
+MAX_MULTIPART_BODY_BYTES = 192 * 1024 * 1024
 MAX_EDGE = 3840
 MIN_PIXELS = 655_360
 MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
-SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
-SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.8.15"
-PROMPT_MAX_CHARS = 1024
-PROMPT_COMPACT_TARGET = 1000
-EDIT_MAX_EDGE = 1792
+# A large local edit is more reliable as a JSON async task. The relay stages
+# local files as temporary HTTPS references before submitting upstream, so
+# this changes only the response transport, never the source pixels or size.
 AUTO_ASYNC_REFERENCE_COUNT = 6
 AUTO_ASYNC_REFERENCE_BYTES = 48 * 1024 * 1024
+PROMPT_MAX_CHARS = 1024
+PROMPT_COMPACT_TARGET = 1000
+# The pinned GPT Image 2 routes accept native 4K edits. Older relays can still
+# opt into the legacy downscale through IMAGEGEN_LEGACY_EDIT_RESIZE.
+EDIT_MAX_EDGE = 1792
+QUALITY_VALUES = {"auto", "low", "medium", "high"}
+ASPECT_RATIOS = {"auto", "1:1", "3:2", "2:3"}
+SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+MASK_SUPPORT_ENV = "IMAGEGEN_MASK_SUPPORT"
 
 
 class ImageGenError(RuntimeError):
     pass
+
+
+CONTENT_POLICY_MARKERS = (
+    "copyright",
+    "trademark",
+    "safety",
+    "moderation",
+    "disallowed",
+    "content policy",
+    "policy violation",
+    "content violation",
+    "版权",
+    "著作权",
+    "商标",
+    "安全策略",
+    "内容审核",
+    "内容违规",
+)
+ROUTE_MARKERS = (
+    "model_not_found",
+    "no available channel",
+    "no usable channel",
+    "distributor",
+    "无可用渠道",
+    "无可用模型",
+    "模型不存在",
+)
+
+
+def _diagnose_upstream_failure(detail: str, status_code: int | None = None) -> tuple[str, str]:
+    """Classify a relay/upstream error without pretending a generic 400 is a policy verdict."""
+    normalized = (detail or "").lower()
+    if any(marker.lower() in normalized for marker in CONTENT_POLICY_MARKERS):
+        return (
+            "content_policy",
+            "模型明确拒绝了这次内容/版权/安全策略请求。这可能涉及版权角色、商标或其他内容限制，"
+            "不是本地 Skill 的尺寸或文件错误；请改用原创描述，或让中转站提供模型原始审核原因。",
+        )
+    if any(marker.lower() in normalized for marker in ROUTE_MARKERS):
+        return (
+            "model_route",
+            "中转站当前没有可用的模型渠道，或模型映射不可用；这不是版权提示。请检查渠道、模型名和分组配置。",
+        )
+    if status_code in {400, 422} and (
+        "request failed" in normalized
+        or "bad_response_status_code" in normalized
+        or not normalized
+    ):
+        return (
+            "upstream_rejection_unknown",
+            "中转站把模型的失败响应包装成了泛化错误，未返回具体原因；仅凭这个 400 无法确认是否版权拦截。"
+            "相同请求在不同尺寸或模型也失败时，更应先排查模型渠道/路由和中转站错误透传。",
+        )
+    if status_code is not None and status_code >= 500:
+        return (
+            "upstream_service",
+            "模型服务或中转站暂时失败，未生成图片；请检查模型服务状态和渠道日志。",
+        )
+    return (
+        "upstream_request",
+        "模型请求未成功，但返回信息不足以判断是参数、渠道还是内容策略；请查看中转站的原始响应。",
+    )
+
+
+def _format_upstream_error(detail: str, status_code: int | None = None) -> str:
+    category, explanation = _diagnose_upstream_failure(detail, status_code)
+    status = f"HTTP {status_code}" if status_code is not None else "异步任务失败"
+    raw = (detail or "未提供详细原因").strip()[:1000]
+    return f"{status} [{category}] {explanation} 原始信息: {raw}"
+
+
+def compact_prompt(prompt: str, limit: int = PROMPT_MAX_CHARS) -> tuple[str, bool]:
+    """Keep an overlong prompt within the upstream limit without a retry."""
+    normalized = re.sub(r"\s+", " ", prompt).strip()
+    if len(normalized) <= limit:
+        return normalized, False
+
+    target = min(limit, PROMPT_COMPACT_TARGET)
+    marker = "..."
+    available = max(32, target - len(marker) - 1)
+    head_budget = max(16, int(available * 0.72))
+    tail_budget = max(16, available - head_budget)
+    head = normalized[:head_budget].rstrip(" ,;:")
+    tail = normalized[-tail_budget:].lstrip(" ,;:")
+    compacted = f"{head}{marker} {tail}".strip()
+    if len(compacted) > limit:
+        compacted = compacted[:limit].rstrip()
+    return compacted, True
 
 
 def _environment_value(name: str) -> str:
@@ -66,6 +166,51 @@ def _environment_value(name: str) -> str:
         except (FileNotFoundError, OSError):
             pass
     return ""
+
+
+def _skill_env_file_values() -> dict[str, str]:
+    """Read installer-managed credentials without evaluating shell syntax."""
+    try:
+        path = Path.home() / ".codex" / "Matrixapi-imagegen.env"
+    except RuntimeError:
+        return {}
+    if not path.is_file():
+        return {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    allowed = {"IMAGEGEN_API_KEY", "IMAGEGEN_MODEL"}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        name = name.strip()
+        if name in allowed:
+            values[name] = value.strip().strip('"').strip("'")
+    return values
+
+
+def mask_support_enabled(model: str) -> bool:
+    """Return whether a model's local mask path was explicitly enabled."""
+    if model not in {"gpt-image-2", "gpt-image-2-pro"}:
+        return True
+    return _environment_value(MASK_SUPPORT_ENV).lower() in {"1", "true", "yes"}
+
+
+def _user_environment_value(name: str) -> str:
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, _ = winreg.QueryValueEx(key, name)
+        return value.strip() if isinstance(value, str) else ""
+    except (FileNotFoundError, OSError):
+        return ""
 
 
 def _nested_strings(value: Any, key_name: str) -> list[str]:
@@ -145,9 +290,12 @@ def _paired_environment(
 
 
 def discover_credentials() -> tuple[str, str, str, str]:
-    configured = _paired_environment("IMAGEGEN", DEFAULT_BASE_URL)
-    if configured:
-        base_url, key = configured
+    skill_env = _skill_env_file_values()
+    imagegen_key = _environment_value("IMAGEGEN_API_KEY") or skill_env.get(
+        "IMAGEGEN_API_KEY", ""
+    )
+    if imagegen_key:
+        base_url, key = DEFAULT_BASE_URL, imagegen_key
         source = "environment"
     else:
         configured = _paired_environment("OPENAI")
@@ -158,13 +306,20 @@ def discover_credentials() -> tuple[str, str, str, str]:
             current = _discover_current_cc_switch_provider()
             if not current:
                 raise ImageGenError(
-                    "No image API configuration found. Set IMAGEGEN_BASE_URL and "
-                    "IMAGEGEN_API_KEY, set OPENAI_BASE_URL and OPENAI_API_KEY, or "
+                    "No image API configuration found. Set IMAGEGEN_API_KEY, "
+                    "set OPENAI_BASE_URL and OPENAI_API_KEY for the fixed relay, or "
                     "select a compatible Codex provider in CC Switch"
                 )
             base_url, key, source = current
 
-    model = _environment_value("IMAGEGEN_MODEL") or DEFAULT_MODEL
+    # A persistent user-level model setting should win over a stale process
+    # environment inherited by a long-lived desktop session.
+    model = (
+        _user_environment_value("IMAGEGEN_MODEL")
+        or _environment_value("IMAGEGEN_MODEL")
+        or skill_env.get("IMAGEGEN_MODEL", "")
+        or DEFAULT_MODEL
+    )
     return base_url, key, model, source
 
 
@@ -239,111 +394,184 @@ def validate_size(size: str) -> str:
     return f"{width}x{height}"
 
 
-def edit_working_size(size: str) -> str:
-    """Preserve the requested edit size; the provider decides its own limits."""
-    return validate_size(size)
+SIZE_ALIASES = {"1K", "2K", "4K"}
 
 
-def default_aspect_ratio(size: str, requested: str = "") -> str:
-    """Use a comic-friendly portrait ratio only when the caller omitted one."""
-    explicit = requested.strip()
-    if explicit:
-        return explicit
+def normalize_size(size: str) -> str:
+    normalized = size.strip().upper()
+    if normalized in SIZE_ALIASES:
+        return normalized
+    return validate_size(normalized)
+
+
+def legacy_pixel_size(size: str, aspect_ratio: str) -> str:
+    """Map upstream size aliases to a multipart relay's pixel-size format."""
+    if size not in SIZE_ALIASES:
+        return validate_size(size)
+    dimensions = {
+        "1K": {"auto": "1024x1024", "1:1": "1024x1024", "3:2": "1536x1024", "2:3": "1024x1536"},
+        "2K": {"auto": "2048x2048", "1:1": "2048x2048", "3:2": "2048x1360", "2:3": "1360x2048"},
+        "4K": {"auto": "3840x2160", "1:1": "3840x3840", "3:2": "3840x2560", "2:3": "2560x3840"},
+    }
+    return validate_size(dimensions[size][aspect_ratio])
+
+
+def validate_quality(quality: str) -> str:
+    normalized = quality.strip().lower()
+    if normalized not in QUALITY_VALUES:
+        choices = ", ".join(sorted(QUALITY_VALUES))
+        raise ImageGenError(f"Quality must be one of: {choices}")
+    return normalized
+
+
+def validate_aspect_ratio(aspect_ratio: str) -> str:
+    normalized = aspect_ratio.strip().lower()
+    if normalized not in ASPECT_RATIOS:
+        choices = ", ".join(sorted(ASPECT_RATIOS))
+        raise ImageGenError(f"Aspect ratio must be one of: {choices}")
+    return normalized
+
+
+def _dimensions_from_image_bytes(data: bytes, mime: str, label: str) -> tuple[int, int]:
+    """Read dimensions from supported image headers without requiring Pillow."""
+    width = height = 0
+    if mime == "image/png" and len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        width = int.from_bytes(data[16:20], "big")
+        height = int.from_bytes(data[20:24], "big")
+    elif mime == "image/gif" and len(data) >= 10 and data[:6] in {b"GIF87a", b"GIF89a"}:
+        width = int.from_bytes(data[6:8], "little")
+        height = int.from_bytes(data[8:10], "little")
+    elif mime == "image/webp" and len(data) >= 30 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        offset = 12
+        while offset + 8 <= len(data):
+            chunk = data[offset : offset + 4]
+            chunk_size = int.from_bytes(data[offset + 4 : offset + 8], "little")
+            start = offset + 8
+            end = start + chunk_size
+            if end > len(data):
+                break
+            if chunk == b"VP8X" and chunk_size >= 10:
+                width = 1 + int.from_bytes(data[start + 4 : start + 7], "little")
+                height = 1 + int.from_bytes(data[start + 7 : start + 10], "little")
+                break
+            if chunk == b"VP8L" and chunk_size >= 5 and data[start] == 0x2F:
+                bits = data[start + 1 : start + 5]
+                width = 1 + (bits[0] | ((bits[1] & 0x3F) << 8))
+                height = 1 + ((bits[1] >> 6) | (bits[2] << 2) | ((bits[3] & 0x0F) << 10))
+                break
+            if chunk == b"VP8 " and chunk_size >= 10:
+                frame = data.find(b"\x9d\x01\x2a", start, end)
+                if frame >= 0 and frame + 7 <= end:
+                    width = int.from_bytes(data[frame + 3 : frame + 5], "little") & 0x3FFF
+                    height = int.from_bytes(data[frame + 5 : frame + 7], "little") & 0x3FFF
+                    break
+            offset = end + (chunk_size & 1)
+    elif mime == "image/jpeg" and len(data) >= 4 and data[:2] == b"\xff\xd8":
+        offset = 2
+        sof_markers = {
+            *range(0xC0, 0xC4),
+            *range(0xC5, 0xC8),
+            *range(0xC9, 0xCC),
+            *range(0xCD, 0xD0),
+        }
+        while offset + 3 < len(data):
+            if data[offset] != 0xFF:
+                offset += 1
+                continue
+            while offset < len(data) and data[offset] == 0xFF:
+                offset += 1
+            if offset >= len(data):
+                break
+            marker = data[offset]
+            offset += 1
+            if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+                continue
+            if offset + 2 > len(data):
+                break
+            segment_length = int.from_bytes(data[offset : offset + 2], "big")
+            if segment_length < 2 or offset + segment_length > len(data):
+                break
+            if marker in sof_markers and segment_length >= 7:
+                height = int.from_bytes(data[offset + 3 : offset + 5], "big")
+                width = int.from_bytes(data[offset + 5 : offset + 7], "big")
+                break
+            offset += segment_length
+
+    if width <= 0 or height <= 0:
+        raise ImageGenError(f"无法读取{label}的宽高；请提供有效的 PNG、JPEG、WEBP 或 GIF 图片")
+    return width, height
+
+
+def image_dimensions(path_value: str, label: str = "Input image") -> tuple[int, int]:
+    """Validate a local image and return its pixel dimensions."""
+    _, mime, data = _input_image(path_value, label)
+    return _dimensions_from_image_bytes(data, mime, label)
+
+
+def infer_image_aspect_ratio(image_paths: list[str]) -> str:
+    """Choose the closest supported model ratio from the first input image."""
+    if not image_paths:
+        raise ImageGenError("无法从空的输入图片列表推断比例")
+    width, height = image_dimensions(image_paths[0])
+    actual = width / height
+    candidates = {"1:1": 1.0, "3:2": 1.5, "2:3": 2 / 3}
+    return min(candidates, key=lambda ratio: abs(actual - candidates[ratio]))
+
+
+def resolve_aspect_ratio(aspect_ratio: str, image_paths: list[str] | None = None) -> tuple[str, str]:
+    """Resolve auto ratio and report whether it came from the input image."""
+    normalized = validate_aspect_ratio(aspect_ratio)
+    if normalized != "auto":
+        return normalized, "user"
+    if image_paths:
+        return infer_image_aspect_ratio(image_paths), "input_image"
+    return normalized, "model_default"
+
+
+def edit_working_size(size: str, model: str) -> str:
+    """Return the edit size, preserving native GPT Image 2 tiers by default."""
+    if model in {"gpt-image-2", "gpt-image-2-pro"} and not _environment_value(
+        "IMAGEGEN_LEGACY_EDIT_RESIZE"
+    ).lower() in {"1", "true", "yes"}:
+        return size
+
     width, height = (int(value) for value in size.split("x"))
-    return "2:3" if height > width else ""
+    long_edge = max(width, height)
+    if long_edge <= EDIT_MAX_EDGE:
+        return size
+
+    scale = EDIT_MAX_EDGE / long_edge
+    working_width = max(16, int(width * scale) // 16 * 16)
+    working_height = max(16, int(height * scale) // 16 * 16)
+
+    # Rounding down can make a source ratio that was exactly 3:1 exceed the
+    # provider's ratio limit by one block; trim the long edge if necessary.
+    while max(working_width, working_height) > 3 * min(working_width, working_height):
+        if working_width >= working_height:
+            working_width -= 16
+        else:
+            working_height -= 16
+
+    return validate_size(f"{working_width}x{working_height}")
 
 
-_SAFETY_PROMPT_REWRITES = (
-    (re.compile(r"(?i)\b(?:bloodied|bloody|bleeding|blood|gore|gory)\b"), "cinematic action"),
-    (re.compile(r"(?i)\b(?:dismemberment|dismembered|decapitation|decapitate|severed limbs?)\b"), "non-graphic action"),
-    (re.compile(r"(?i)\b(?:kill|killing|killed|murder|murdered|massacre|torture|torturing)\b"), "defeat"),
-    (re.compile(r"(?i)\b(?:violent|violence|brutal|brutality)\b"), "dramatic"),
-    (re.compile(r"血腥|血液|流血|鲜血|喷血|肢解|断肢|断头|砍头|斩首|虐杀|屠杀|谋杀|杀死|杀害|暴力|残暴|残忍"), "电影化动作"),
-)
-
-
-def sanitize_prompt(prompt: str) -> tuple[str, bool]:
-    """Rewrite graphic injury language once, locally, without adding a retry."""
-    sanitized = prompt
-    changed = False
-    for pattern, replacement in _SAFETY_PROMPT_REWRITES:
-        sanitized, count = pattern.subn(replacement, sanitized)
-        changed = changed or bool(count)
-    if changed:
-        sanitized = (
-            f"{sanitized.rstrip()}\n"
-            "cinematic, non-graphic action; clean presentation; no injury detail"
-        )
-    return sanitized, changed
-
-
-def compact_prompt(prompt: str) -> tuple[str, bool]:
-    """Keep prompts within the upstream limit without a second billed request."""
-    if len(prompt) <= PROMPT_MAX_CHARS:
-        return prompt, False
-    target = min(PROMPT_COMPACT_TARGET, PROMPT_MAX_CHARS)
-    head = max(16, int(target * 0.72))
-    tail = max(16, target - head)
-    compacted = f"{prompt[:head].rstrip()}\n{prompt[-tail:].lstrip()}"
-    return compacted[:PROMPT_MAX_CHARS], True
-
-
-def sequence_page_prompt(prompt: str, page_index: int, page_count: int) -> tuple[str, bool]:
-    """Bind one API call to one page while preserving the complete story brief."""
-    if page_count <= 1:
-        return prompt, False
-    if page_index == 1:
-        instruction = (
-            f"Sequence page {page_index}/{page_count}: generate only the first page now; "
-            "do not combine later pages into this image."
-        )
-    else:
-        instruction = (
-            f"Sequence page {page_index}/{page_count}: use the attached immediately preceding "
-            "page only for character, visual, and story continuity; generate only this next "
-            "page and do not repeat or combine earlier pages."
-        )
-    available = PROMPT_MAX_CHARS - len(instruction) - 1
-    if len(prompt) <= available:
-        return f"{prompt}\n{instruction}", False
-    head = max(16, int(available * 0.72))
-    tail = max(16, available - head - 1)
-    compacted = f"{prompt[:head].rstrip()}\n{prompt[-tail:].lstrip()}"
-    return f"{compacted[:available]}\n{instruction}", True
-
-
-def request_fingerprint(
-    prompt: str,
-    model: str,
+def should_auto_async_local_edit(
     size: str,
-    mode: str,
-    quality: str,
-    image_paths: list[str],
-    mask_path: str | None,
-    count: int = 1,
-    sequence: bool = False,
-) -> str:
-    digest = hashlib.sha256()
-    for value in (
-        prompt,
-        model,
-        size,
-        mode,
-        quality or "",
-        str(count),
-        "sequence" if sequence else "independent",
-    ):
-        digest.update(value.encode("utf-8"))
-        digest.update(b"\0")
-    for path in image_paths + ([mask_path] if mask_path else []):
-        if not path:
-            continue
-        digest.update(str(Path(path).expanduser().resolve()).encode("utf-8"))
-        digest.update(b"\0")
-        with Path(path).expanduser().open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-    return digest.hexdigest()
+    model: str,
+    image_count: int,
+    input_bytes: int,
+    has_mask: bool,
+) -> bool:
+    """Select async only for local GPT Image 2 edits likely to outlive sync."""
+    if model not in {"gpt-image-2", "gpt-image-2-pro"} or has_mask:
+        return False
+    width, height = (int(value) for value in size.split("x"))
+    if max(width, height) <= EDIT_MAX_EDGE:
+        return False
+    return (
+        image_count >= AUTO_ASYNC_REFERENCE_COUNT
+        or input_bytes >= AUTO_ASYNC_REFERENCE_BYTES
+    )
 
 
 def _read_limited(response: Any, limit: int) -> bytes:
@@ -363,7 +591,7 @@ def _safe_http_detail(exc: urllib.error.HTTPError, key: str) -> str:
 def _parse_api_response(raw: bytes) -> dict[str, Any]:
     text = raw.decode("utf-8", errors="replace").strip()
     if "data:" in text:
-        latest: dict[str, Any] | None = None
+        last_event: dict[str, Any] | None = None
         for line in text.splitlines():
             if not line.startswith("data:"):
                 continue
@@ -375,11 +603,11 @@ def _parse_api_response(raw: bytes) -> dict[str, Any]:
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
-                latest = event
-        if latest is not None:
-            if latest.get("url") and not latest.get("data"):
-                latest["data"] = [{"url": latest["url"]}]
-            return latest
+                last_event = event
+        if last_event:
+            if last_event.get("url") and not last_event.get("data"):
+                last_event["data"] = [{"url": last_event["url"]}]
+            return last_event
     try:
         result = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -390,8 +618,6 @@ def _parse_api_response(raw: bytes) -> dict[str, Any]:
         result["data"] = result["results"]
     if not result.get("data") and result.get("url"):
         result["data"] = [{"url": result["url"]}]
-    if not result.get("data") and not (result.get("id") or result.get("task_id")):
-        raise ImageGenError("Image API returned no image data")
     return result
 
 
@@ -418,7 +644,7 @@ def _post_image_request(
             raw = _read_limited(response, MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         detail = _safe_http_detail(exc, key)
-        raise ImageGenError(f"Image API returned HTTP {exc.code}: {detail}") from exc
+        raise ImageGenError(_format_upstream_error(detail, exc.code)) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ImageGenError(f"Image API request failed: {exc}") from exc
     return _parse_api_response(raw)
@@ -447,10 +673,13 @@ def call_api(
     size: str,
     count: int,
     timeout: int,
-    options: dict[str, str] | None = None,
+    options: dict[str, Any] | None = None,
     aspect_ratio: str = "",
     image_urls: list[str] | None = None,
+    stream: bool = False,
     async_mode: bool = False,
+    webhook: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Call the JSON generations endpoint."""
     payload: dict[str, Any] = {
@@ -466,7 +695,12 @@ def call_api(
         payload["aspect_ratio"] = aspect_ratio
     if image_urls:
         payload["images"] = image_urls
+    payload["stream"] = stream
     payload["async"] = async_mode
+    if webhook:
+        payload["webhook"] = webhook
+    if metadata:
+        payload["metadata"] = metadata
     return _post_image_request(
         endpoint,
         key,
@@ -474,6 +708,65 @@ def call_api(
         "application/json",
         timeout,
     )
+
+
+def _status_endpoint(endpoint: str, task_id: str) -> str:
+    parsed = urllib.parse.urlparse(endpoint)
+    path = parsed.path
+    marker = "/images/generations"
+    if marker in path:
+        path = path.split(marker, 1)[0] + f"/status/{urllib.parse.quote(task_id, safe='')}"
+    else:
+        path = path.rstrip("/") + f"/status/{urllib.parse.quote(task_id, safe='')}"
+    return urllib.parse.urlunparse(parsed._replace(path=path, query="", fragment=""))
+
+
+def _get_image_request(endpoint: str, key: str, timeout: int) -> dict[str, Any]:
+    request = urllib.request.Request(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            "User-Agent": f"Matrixapi-imagegen-skill/{SKILL_VERSION}",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return _parse_api_response(_read_limited(response, MAX_RESPONSE_BYTES))
+    except urllib.error.HTTPError as exc:
+        detail = _safe_http_detail(exc, key)
+        raise ImageGenError(_format_upstream_error(detail, exc.code)) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ImageGenError(f"Image status request failed: {exc}") from exc
+
+
+def wait_for_task(
+    result: dict[str, Any], endpoint: str, key: str, timeout: int
+) -> dict[str, Any]:
+    if result.get("data"):
+        return result
+    task_id = str(result.get("id") or result.get("task_id") or "").strip()
+    if not task_id:
+        raise ImageGenError("Async image API response did not include a task id")
+    deadline = time.monotonic() + timeout
+    status_url = _status_endpoint(endpoint, task_id)
+    latest = result
+    while time.monotonic() < deadline:
+        latest = _get_image_request(status_url, key, min(60, max(10, timeout)))
+        status = str(latest.get("status") or "").lower()
+        if status in {"succeeded", "completed"} or (latest.get("data") and not status):
+            return latest
+        if status in {"failed", "error", "cancelled"}:
+            reason = latest.get("failure_reason") or latest.get("error") or status
+            reason_text = (
+                json.dumps(reason, ensure_ascii=False)
+                if isinstance(reason, (dict, list))
+                else str(reason)
+            )
+            raise ImageGenError(_format_upstream_error(reason_text))
+        time.sleep(3)
+    raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
 
 
 def _safe_filename(path: Path) -> str:
@@ -502,6 +795,28 @@ def _input_image(path_value: str, label: str) -> tuple[str, str, bytes]:
     return _safe_filename(path), mime, data
 
 
+def _input_image_bytes(paths: Iterable[str], mask_path: str | None = None) -> int:
+    """Validate local file sizes before building or sending multipart data."""
+    total = 0
+    labelled_paths = [(path, "Input image") for path in paths]
+    if mask_path:
+        labelled_paths.append((mask_path, "Mask image"))
+    for path_value, label in labelled_paths:
+        path = Path(path_value).expanduser()
+        if not path.is_file():
+            raise ImageGenError(f"{label} file does not exist: {path}")
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            raise ImageGenError(f"Unable to inspect {label} file: {path}") from exc
+        if size <= 0:
+            raise ImageGenError(f"{label} file is empty: {path}")
+        if size > MAX_IMAGE_BYTES:
+            raise ImageGenError(f"{label} file exceeds the 50 MB safety limit: {path}")
+        total += size
+    return total
+
+
 def _input_mime(data: bytes, path: Path) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -519,35 +834,11 @@ def _input_mime(data: bytes, path: Path) -> str:
     )
 
 
-def _input_image_bytes(image_paths: list[str], mask_path: str | None = None) -> int:
-    total = 0
-    for path in image_paths + ([mask_path] if mask_path else []):
-        if not path:
-            continue
-        total += len(_input_image(path, "Input image")[2])
-    return total
-
-
-def should_auto_async_local_edit(
-    size: str,
-    model: str,
-    image_count: int,
-    input_bytes: int,
-    has_mask: bool,
-) -> bool:
-    if model not in SUPPORTED_MODELS or has_mask:
-        return False
-    width, height = (int(value) for value in size.split("x"))
-    if max(width, height) <= EDIT_MAX_EDGE:
-        return False
-    return image_count >= AUTO_ASYNC_REFERENCE_COUNT or input_bytes >= AUTO_ASYNC_REFERENCE_BYTES
-
-
 def _multipart_body(
     fields: Iterable[tuple[str, str]],
     files: Iterable[tuple[str, str, str, bytes]],
 ) -> tuple[bytes, str]:
-    boundary = f"----api-imagegen-{uuid.uuid4().hex}"
+    boundary = f"----Matrixapi-imagegen-{uuid.uuid4().hex}"
     chunks: list[bytes] = []
     for name, value in fields:
         chunks.append(
@@ -588,13 +879,27 @@ def call_edit_api(
         raise ImageGenError("At least one --image file is required for editing")
     if len(image_paths) > MAX_INPUT_IMAGES:
         raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
+    total_input_bytes = _input_image_bytes(image_paths, mask_path)
+    if total_input_bytes > MAX_MULTIPART_BODY_BYTES:
+        limit_mib = MAX_MULTIPART_BODY_BYTES // (1024 * 1024)
+        actual_mib = total_input_bytes / (1024 * 1024)
+        raise ImageGenError(
+            f"Combined input images are too large for one upload ({actual_mib:.1f} MiB; "
+            f"limit {limit_mib} MiB). Remove unrelated references or submit a smaller set; "
+            "the images were not sent and no task was charged."
+        )
 
     fields: list[tuple[str, str]] = [
         ("model", model),
         ("prompt", prompt),
         ("size", size),
-        ("n", str(count)),
     ]
+    # The pinned GPT Image 2 contract does not guarantee the generic `n`
+    # parameter. A single edit is the normal skill path, so omit n=1 even
+    # before the relay's multipart-to-JSON conversion. Other image models keep
+    # the legacy multipart count behavior for compatibility.
+    if count != 1 and model not in {"gpt-image-2", "gpt-image-2-pro"}:
+        fields.append(("n", str(count)))
     if options:
         fields.extend(options.items())
 
@@ -639,77 +944,6 @@ def _image_extension(data: bytes, content_type: str = "") -> str:
     raise ImageGenError("The API returned data that is not a supported image")
 
 
-def _image_metadata(data: bytes, content_type: str = "") -> dict[str, int | str]:
-    """Read the actual dimensions and format from a supported raster image."""
-    image_format = ""
-    width = height = 0
-
-    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
-        image_format = "PNG"
-        width = int.from_bytes(data[16:20], "big")
-        height = int.from_bytes(data[20:24], "big")
-    elif data.startswith((b"GIF87a", b"GIF89a")) and len(data) >= 10:
-        image_format = "GIF"
-        width = int.from_bytes(data[6:8], "little")
-        height = int.from_bytes(data[8:10], "little")
-    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        image_format = "WEBP"
-        chunk = data[12:16]
-        if chunk == b"VP8X" and len(data) >= 30:
-            width = int.from_bytes(data[24:27], "little") + 1
-            height = int.from_bytes(data[27:30], "little") + 1
-        elif chunk == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
-            width = int.from_bytes(data[26:28], "little") & 0x3FFF
-            height = int.from_bytes(data[28:30], "little") & 0x3FFF
-        elif chunk == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
-            bits = int.from_bytes(data[21:25], "little")
-            width = (bits & 0x3FFF) + 1
-            height = ((bits >> 14) & 0x3FFF) + 1
-    elif data.startswith(b"\xff\xd8\xff"):
-        image_format = "JPEG"
-        offset = 2
-        sof_markers = {
-            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
-            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
-        }
-        while offset + 9 <= len(data):
-            if data[offset] != 0xFF:
-                offset += 1
-                continue
-            while offset < len(data) and data[offset] == 0xFF:
-                offset += 1
-            if offset >= len(data):
-                break
-            marker = data[offset]
-            offset += 1
-            if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
-                continue
-            if offset + 2 > len(data):
-                break
-            segment_length = int.from_bytes(data[offset:offset + 2], "big")
-            if segment_length < 2 or offset + segment_length > len(data):
-                break
-            if marker in sof_markers and segment_length >= 7:
-                height = int.from_bytes(data[offset + 3:offset + 5], "big")
-                width = int.from_bytes(data[offset + 5:offset + 7], "big")
-                break
-            offset += segment_length
-
-    if not image_format:
-        _image_extension(data, content_type)
-    if width <= 0 or height <= 0:
-        raise ImageGenError("Unable to read the generated image dimensions")
-
-    longest_edge = max(width, height)
-    resolution = "4K" if longest_edge >= 3840 else "2K" if longest_edge >= 2048 else "1K"
-    return {
-        "width": width,
-        "height": height,
-        "format": image_format,
-        "resolution": resolution,
-    }
-
-
 def _decode_data_url(url: str) -> tuple[bytes, str]:
     header, encoded = url.split(",", 1)
     try:
@@ -739,14 +973,17 @@ def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[by
 
 def save_images(
     result: dict[str, Any], endpoint: str, key: str, output_dir: Path, timeout: int
-) -> tuple[list[str], list[dict[str, int | str]]]:
+) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_id = uuid.uuid4().hex[:8]
     paths: list[str] = []
-    image_info: list[dict[str, int | str]] = []
 
-    for index, item in enumerate(result["data"], start=1):
+    items = result.get("data") or result.get("results")
+    if not isinstance(items, list) or not items:
+        raise ImageGenError("Image API returned no image data")
+
+    for index, item in enumerate(items, start=1):
         if not isinstance(item, dict):
             raise ImageGenError("Image API returned an invalid image item")
         content_type = ""
@@ -765,14 +1002,12 @@ def save_images(
         if not data or len(data) > MAX_IMAGE_BYTES:
             raise ImageGenError("Generated image is empty or too large")
         suffix = _image_extension(data, content_type)
-        metadata = _image_metadata(data, content_type)
         final_path = output_dir / f"image-{stamp}-{run_id}-{index}{suffix}"
         temp_path = final_path.with_suffix(final_path.suffix + ".part")
         temp_path.write_bytes(data)
         temp_path.replace(final_path)
         paths.append(str(final_path.resolve()))
-        image_info.append(metadata)
-    return paths, image_info
+    return paths
 
 
 def preview_paths(paths: Iterable[str]) -> list[str]:
@@ -780,237 +1015,113 @@ def preview_paths(paths: Iterable[str]) -> list[str]:
     return [Path(path).resolve().as_posix() for path in paths]
 
 
-def _result_file(output_dir: Path, request_id: str) -> Path:
-    return output_dir / f".result-{request_id}.json"
-
-
-def _completion_marker(output_dir: Path, request_id: str) -> Path:
-    return output_dir / f".completed-{request_id}.json"
-
-
-def _ready_marker(output_dir: Path, request_id: str) -> Path:
-    return output_dir / f".ready-{request_id}.json"
-
-
-def _running_marker(output_dir: Path, request_id: str) -> Path:
-    return output_dir / f".running-{request_id}.json"
-
-
-def _write_sidecar(path: Path, payload: dict[str, Any]) -> None:
-    temp_path = path.with_suffix(path.suffix + ".part")
-    temp_path.write_text(
-        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-    )
-    temp_path.replace(path)
-
-
-def _status_endpoint(endpoint: str, task_id: str) -> str:
-    parsed = urllib.parse.urlparse(endpoint)
-    path = parsed.path
-    marker = "/images/generations"
-    if marker in path:
-        path = path.split(marker, 1)[0] + f"/status/{urllib.parse.quote(task_id, safe='')}"
-    else:
-        path = path.rstrip("/") + f"/status/{urllib.parse.quote(task_id, safe='')}"
-    return urllib.parse.urlunparse(parsed._replace(path=path, query="", fragment=""))
-
-
-def _get_image_request(endpoint: str, key: str, timeout: int) -> dict[str, Any]:
-    request = urllib.request.Request(
-        endpoint,
-        headers={"Authorization": f"Bearer {key}", "Accept": "application/json", "User-Agent": f"Matrixapi-imagegen-skill/{SKILL_VERSION}"},
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return _parse_api_response(_read_limited(response, MAX_RESPONSE_BYTES))
-    except urllib.error.HTTPError as exc:
-        raise ImageGenError(f"Image status request failed with HTTP {exc.code}: {_safe_http_detail(exc, key)}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ImageGenError(f"Image status request failed: {exc}") from exc
-
-
-def wait_for_task(result: dict[str, Any], endpoint: str, key: str, timeout: int) -> dict[str, Any]:
-    if result.get("data"):
-        return result
-    task_id = str(result.get("id") or result.get("task_id") or "").strip()
-    if not task_id:
-        raise ImageGenError("Async image API response did not include a task id")
-    deadline = time.monotonic() + timeout
-    status_url = _status_endpoint(endpoint, task_id)
-    while time.monotonic() < deadline:
-        latest = _get_image_request(status_url, key, min(60, max(10, timeout)))
-        status = str(latest.get("status") or "").lower()
-        if status in {"succeeded", "completed"} or (latest.get("data") and not status):
-            return latest
-        if status in {"failed", "error", "cancelled"}:
-            reason = latest.get("failure_reason") or latest.get("error") or status
-            raise ImageGenError(f"Async image task failed: {reason}")
-        time.sleep(3)
-    raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
-
-
-def _hide_sidecar(path: Path) -> None:
-    """Hide task sidecars in Windows Explorer without changing their paths."""
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-
-        get_attributes = ctypes.windll.kernel32.GetFileAttributesW
-        set_attributes = ctypes.windll.kernel32.SetFileAttributesW
-        get_attributes.argtypes = [ctypes.c_wchar_p]
-        get_attributes.restype = ctypes.c_uint32
-        set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
-        set_attributes.restype = ctypes.c_int
-        attributes = get_attributes(str(path))
-        if attributes == 0xFFFFFFFF:
-            return
-        set_attributes(str(path), attributes | 0x2)
-    except (AttributeError, OSError):
-        # The sidecar remains usable if the platform cannot set Explorer flags.
-        return
-
-
-def _load_ready_result(
-    path: Path, request_id: str, execution_id: str, fingerprint: str = ""
-) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ImageGenError("The saved result for this task is not readable") from exc
-    preview_files = payload.get("preview_files") if isinstance(payload, dict) else None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("ok") is not True
-        or payload.get("request_id") != request_id
-        or payload.get("execution_id") != execution_id
-        or (fingerprint and payload.get("request_fingerprint") != fingerprint)
-        or not isinstance(preview_files, list)
-        or not preview_files
-        or any(not isinstance(path_value, str) or not Path(path_value).is_file() for path_value in preview_files)
-    ):
-        raise ImageGenError("The saved result for this task is incomplete")
-    return payload
-
-
-def _load_running_execution(
-    path: Path, request_id: str
-) -> tuple[str, float] | None:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        execution_id = payload["execution_id"]
-        expires_at = float(payload["expires_at"])
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-    if (
-        payload.get("request_id") != request_id
-        or not isinstance(execution_id, str)
-        or not execution_id
-    ):
-        return None
-    return execution_id, expires_at
-
-
-def _reserve_request(
-    output_dir: Path,
-    request_id: str,
-    allow_repeat: bool,
-    timeout: int,
-    fingerprint: str = "",
-) -> tuple[Path | None, str, dict[str, Any] | None]:
-    """Reserve a task before the API call and reuse an overlapping task's result."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ready = _ready_marker(output_dir, request_id)
-    running = _running_marker(output_dir, request_id)
-    reservation_seconds = timeout * 2 + 60
-    deadline = time.monotonic() + reservation_seconds
-    observed_execution_id = ""
-
-    while True:
-        if observed_execution_id and ready.is_file():
-            try:
-                result = _load_ready_result(
-                    ready, request_id, observed_execution_id, fingerprint
-                )
-            except ImageGenError:
-                result = None
-            if result is not None:
-                return None, observed_execution_id, result
-
-        # A ready file from an earlier execution never reserves the task ID.
-        # Only a process that observed the currently active running marker may
-        # reuse that execution's exact result.
-        if observed_execution_id and not running.exists():
+def normalize_task_id(value: str | None = None) -> str:
+    """Return a unique, filename-safe task id supplied before the API call."""
+    if value:
+        task_id = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}", task_id):
             raise ImageGenError(
-                "The overlapping image request ended without a usable result"
+                "--task-id must be 8-128 characters using letters, numbers, dot, dash, or underscore"
             )
-
-        execution_id = uuid.uuid4().hex
-        try:
-            descriptor = os.open(running, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            active = _load_running_execution(running, request_id)
-            if active is not None and active[1] <= time.time():
-                try:
-                    running.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            if active is not None:
-                observed_execution_id = active[0]
-            if time.monotonic() >= deadline:
-                raise ImageGenError(
-                    "This task ID is still running; continue waiting for the original command"
-                )
-            time.sleep(0.1)
-            continue
-
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(
-                {
-                    "request_id": request_id,
-                    "execution_id": execution_id,
-                    "skill_version": SKILL_VERSION,
-                    "request_fingerprint": fingerprint,
-                    "expires_at": time.time() + reservation_seconds,
-                },
-                handle,
-            )
-        try:
-            _hide_sidecar(running)
-        except Exception:
-            pass
-        return running, execution_id, None
+        return task_id
+    return f"task-{time.time_ns()}-{uuid.uuid4().hex[:12]}"
 
 
-def _release_request(running: Path) -> None:
+def result_record_path(output_dir: Path, task_id: str) -> Path:
+    return output_dir.expanduser().resolve() / f"result-{task_id}.json"
+
+
+def ensure_new_task(output_dir: Path, task_id: str) -> None:
+    if result_record_path(output_dir, task_id).exists():
+        raise ImageGenError(
+            f"Task id already has a result; choose a new --task-id: {task_id}"
+        )
+
+
+def _utc_millis_text(timestamp_ms: int) -> str:
+    seconds, millis = divmod(timestamp_ms, 1000)
+    return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(seconds))}.{millis:03d}Z"
+
+
+def _schedule_result_hide(path: Path) -> bool:
+    """Hide a delivered result later without delaying stdout or command exit."""
+    if os.name != "nt":
+        return False
+    helper = Path(__file__).resolve().with_name("hide_result.py")
+    if not helper.is_file():
+        return False
     try:
-        running.unlink()
-    except FileNotFoundError:
-        pass
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(helper),
+                str(path),
+                "--delay-ms",
+                str(RESULT_HIDE_DELAY_MS),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=0x08000000 | 0x00000008,
+        )
+    except OSError:
+        return False
+    return True
 
 
-def _refresh_request_reservation(
-    running: Path, request_id: str, execution_id: str, timeout: int, fingerprint: str = ""
-) -> None:
-    """Keep a long multi-output task reserved while each image is processed."""
-    _write_sidecar(
-        running,
+def emit_success(
+    payload: dict[str, Any],
+    output_dir: Path,
+    task_id: str,
+    request_started_at_ms: int,
+) -> dict[str, Any]:
+    """Atomically persist and emit the exact current-task result once."""
+    completed_at_ms = max(time.time_ns() // 1_000_000, request_started_at_ms)
+    result_path = result_record_path(output_dir, task_id)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    enriched = dict(payload)
+    enriched.update(
         {
-            "request_id": request_id,
-            "execution_id": execution_id,
-            "skill_version": SKILL_VERSION,
-            "request_fingerprint": fingerprint,
-            "expires_at": time.time() + timeout * 2 + 60,
-        },
+            "task_id": task_id,
+            "request_started_at_ms": request_started_at_ms,
+            "request_started_at": _utc_millis_text(request_started_at_ms),
+            "completed_at_ms": completed_at_ms,
+            "completed_at": _utc_millis_text(completed_at_ms),
+            "result_file": result_path.as_posix(),
+            "result_match": {
+                "task_id": task_id,
+                "not_before_ms": request_started_at_ms,
+                "completed_at_ms": completed_at_ms,
+            },
+            "result_hide_delay_ms": RESULT_HIDE_DELAY_MS if os.name == "nt" else None,
+        }
     )
-    _hide_sidecar(running)
+    temp_path = result_path.with_suffix(result_path.suffix + f".{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(enriched, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp_path.replace(result_path)
+    except OSError as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ImageGenError(f"Unable to save the current task result JSON: {exc}") from exc
+
+    print(json.dumps(enriched, ensure_ascii=False), flush=True)
+    _schedule_result_hide(result_path)
+    return enriched
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prompt")
+    parser.add_argument(
+        "--prompt",
+        help="Prompt text; GPT Image 2 upstream limit is 1024 characters (overlong text is compacted)",
+    )
+    parser.add_argument("--model", help="Model id; defaults to IMAGEGEN_MODEL or gpt-image-2")
     parser.add_argument(
         "--image",
         "--reference-image",
@@ -1020,15 +1131,16 @@ def parse_args() -> argparse.Namespace:
         help="Local input/reference image; repeat for multiple images and enable edit mode",
     )
     parser.add_argument(
+        "--reference-url",
+        dest="reference_urls",
+        action="append",
+        metavar="URL",
+        help="Public reference image URL; repeat up to 16 times for JSON edit requests",
+    )
+    parser.add_argument(
         "--mask",
         metavar="PATH",
         help="Optional local PNG/JPEG mask for the edit request",
-    )
-    parser.add_argument(
-        "--expected-images",
-        type=int,
-        metavar="COUNT",
-        help="Require exactly COUNT current-message input images before contacting the API",
     )
     parser.add_argument(
         "--mode",
@@ -1036,39 +1148,91 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Request mode; auto selects edit when --image is supplied",
     )
-    parser.add_argument("--size", default="1024x1024")
-    parser.add_argument("--aspect-ratio", default="")
-    parser.add_argument("--n", type=int, default=1)
+    parser.add_argument("--size", help="1K, 2K, 4K, or WIDTHxHEIGHT; defaults to 1K")
     parser.add_argument(
-        "--sequence",
-        action="store_true",
-        help=(
-            "Generate a continuous story sequentially: the first page uses all supplied "
-            "references and each later page uses only the immediately preceding saved page"
-        ),
+        "--aspect-ratio",
+        default="auto",
+        choices=sorted(ASPECT_RATIOS),
+        help="Upstream aspect ratio for JSON generation/edit requests",
     )
-    parser.add_argument("--quality")
+    parser.add_argument("--n", type=int, default=1)
+    parser.add_argument("--quality", choices=sorted(QUALITY_VALUES), default="auto")
+    parser.add_argument("--stream", action="store_true", help="Request SSE output")
+    parser.add_argument(
+        "--async",
+        dest="async_mode",
+        action="store_true",
+        help="Submit an async task and poll /v1/status/{task_id}",
+    )
+    parser.add_argument("--webhook", help="Public HTTPS callback URL for async tasks")
+    parser.add_argument("--metadata", help="Lightweight JSON object attached to async tasks")
     parser.add_argument("--background")
     parser.add_argument("--input-fidelity")
     parser.add_argument("--out-dir", type=Path)
-    parser.add_argument("--timeout", type=int, default=600)
-    parser.add_argument("--async", dest="async_mode", action="store_true")
-    parser.add_argument("--process-only", action="store_true")
-    parser.add_argument("--output-size")
-    parser.add_argument("--fit", choices=("cover", "contain", "fill", "inside", "outside"), default="cover")
-    parser.add_argument("--position", default="center")
-    parser.add_argument("--crop")
-    parser.add_argument("--output-format", choices=("same", "png", "jpeg", "jpg", "webp", "avif"), default="same")
-    parser.add_argument("--output-quality", type=int)
-    parser.add_argument("--output-background")
     parser.add_argument(
-        "--request-id",
-        help="Caller-owned task identifier used to bind output to this request",
+        "--task-id",
+        help="Unique id for matching this command's result without scanning output directories",
     )
     parser.add_argument(
-        "--allow-repeat",
+        "--output-size",
+        help="本地最终输出尺寸 WIDTHxHEIGHT；生成完成后精确缩放/裁剪，不发送给模型",
+    )
+    parser.add_argument(
+        "--fit",
+        choices=("cover", "contain", "fill", "inside", "outside"),
+        default="cover",
+        help="本地输出尺寸的适配方式，默认 cover",
+    )
+    parser.add_argument(
+        "--position",
+        choices=(
+            "center",
+            "top",
+            "bottom",
+            "left",
+            "right",
+            "top-left",
+            "top-right",
+            "bottom-left",
+            "bottom-right",
+        ),
+        default="center",
+        help="cover/contain 裁剪或留白位置，默认 center",
+    )
+    parser.add_argument(
+        "--crop",
+        help="本地像素裁剪区域 x,y,width,height；可与 --output-size 组合",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=("same", "png", "jpeg", "jpg", "webp", "avif"),
+        default="same",
+        help="本地最终输出格式，默认保持模型返回格式",
+    )
+    parser.add_argument(
+        "--output-quality",
+        type=int,
+        help="本地 JPEG/WebP/AVIF 质量 1-100；不传则使用 90",
+    )
+    parser.add_argument(
+        "--output-background",
+        help="本地 contain/JPEG 画布背景色，例如 #FFFFFF 或 #RRGGBBAA",
+    )
+    parser.add_argument(
+        "--postprocess-dir",
+        type=Path,
+        help="本地后处理输出目录；默认使用原图目录下的 processed 子目录",
+    )
+    parser.add_argument(
+        "--process-only",
         action="store_true",
-        help="Allow an explicit retry of a completed request ID",
+        help="只处理已有 --image 文件，不调用图片 API",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="Overall request/task timeout in seconds (10-600; default 600)",
     )
     parser.add_argument("--check-config", action="store_true")
     return parser.parse_args()
@@ -1077,18 +1241,47 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     args = parse_args()
+    request_started_at_ms = time.time_ns() // 1_000_000
+    task_id: str | None = None
     try:
+        if args.n < 1 or args.n > 4:
+            raise ImageGenError("Image count must be between 1 and 4")
+        if args.timeout < 10 or args.timeout > 600:
+            raise ImageGenError("Timeout must be between 10 and 600 seconds")
+        if args.output_quality is not None and not 1 <= args.output_quality <= 100:
+            raise ImageGenError("--output-quality must be between 1 and 100")
+        requested_size = normalize_size(args.size or "1K")
+
+        image_paths = list(args.images or [])
+        reference_urls = list(args.reference_urls or [])
         if args.process_only:
-            image_paths = list(args.images or [])
+            task_id = normalize_task_id(args.task_id)
             if not image_paths:
                 raise ImageGenError("--process-only requires at least one --image file")
-            if not (args.output_size or args.crop or args.output_format != "same" or args.output_quality is not None or args.output_background):
-                raise ImageGenError("--process-only requires a local output or crop option")
+            if reference_urls or args.mask or args.stream or args.async_mode or args.webhook:
+                raise ImageGenError(
+                    "--process-only only accepts local --image files and local post-processing options"
+                )
+            if (
+                args.output_size is None
+                and args.crop is None
+                and args.output_format == "same"
+                and args.output_background is None
+            ):
+                raise ImageGenError(
+                    "--process-only requires --output-size, --crop, or --output-format"
+                )
+            output_dir = args.postprocess_dir or args.out_dir or (
+                Path.home() / ".codex" / "generated_images" / SKILL_NAME / "processed"
+            )
+            ensure_new_task(output_dir, task_id)
             try:
                 processed = process_many(
                     image_paths,
-                    args.out_dir or (Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen" / "processed"),
+                    output_dir,
                     output_size=args.output_size,
                     fit=args.fit,
                     position=args.position,
@@ -1099,23 +1292,30 @@ def main() -> int:
                 )
             except PostprocessError as exc:
                 raise ImageGenError(str(exc)) from exc
-            outputs = [item["output"] for item in processed]
-            payload = {"ok": True, "event": "complete", "mode": "local-process", "skill_version": SKILL_VERSION, "count": len(outputs), "original_files": preview_paths(image_paths), "processed_files": preview_paths(outputs), "preview_files": preview_paths(outputs), "download_files": preview_paths(outputs), "result_ref": {"scope": "current-conversation", "files": preview_paths(outputs)}}
-            print(json.dumps(payload, ensure_ascii=False), flush=True)
-            return 0
-        request_id = (args.request_id or uuid.uuid4().hex).strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", request_id):
-            raise ImageGenError(
-                "Request ID must contain only letters, numbers, dots, underscores, or hyphens"
+            files = [item["output"] for item in processed]
+            preview_files = preview_paths(files)
+            emit_success(
+                {
+                    "ok": True,
+                    "skill_name": SKILL_NAME,
+                    "version": SKILL_VERSION,
+                    "mode": "local-process",
+                    "count": len(files),
+                    "files": files,
+                    "original_files": preview_paths(image_paths),
+                    "processed_files": files,
+                    "preview_files": preview_files,
+                    "download_files": preview_files,
+                    "postprocess_manifest": str(Path(output_dir).resolve() / "postprocess-manifest.json"),
+                },
+                output_dir,
+                task_id,
+                request_started_at_ms,
             )
-        if args.n < 1:
-            raise ImageGenError("Image count must be at least 1")
-        if args.sequence and args.n < 2:
-            raise ImageGenError("--sequence requires --n 2 or greater")
-        if args.timeout < 10 or args.timeout > 600:
-            raise ImageGenError("Timeout must be between 10 and 600 seconds")
-        requested_size = validate_size(args.size)
+            return 0
+
         base_url, key, model, source = discover_credentials()
+        model = (args.model or model).strip()
         generation_url = generation_endpoint(base_url)
         edit_url = edit_endpoint(base_url)
         if args.check_config:
@@ -1123,190 +1323,187 @@ def main() -> int:
                 json.dumps(
                     {
                         "ok": True,
+                        "skill_name": SKILL_NAME,
+                        "version": SKILL_VERSION,
                         "credential_source": source,
                         "model": model,
-                        "skill_version": SKILL_VERSION,
-                        "supported_models": list(SUPPORTED_MODELS),
-                        "supported_modes": ["generate", "edit"],
+                        "supported_models": ["gpt-image-2", "gpt-image-2-pro"],
+                        "prompt_limit": PROMPT_MAX_CHARS,
+                        "supported_modes": [
+                            "generate",
+                            "edit",
+                            "url-reference-edit",
+                            "async",
+                            "stream",
+                            "local-process",
+                        ],
                     },
                     ensure_ascii=False,
                 )
             )
             return 0
 
+        task_id = normalize_task_id(args.task_id)
+        output_dir = args.out_dir or (
+            Path.home() / ".codex" / "generated_images" / SKILL_NAME
+        )
+        ensure_new_task(output_dir, task_id)
+
         raw_prompt = (args.prompt or "").strip()
         if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
-        prompt, prompt_rewritten = sanitize_prompt(raw_prompt)
-        prompt, prompt_compacted = compact_prompt(prompt)
+        original_prompt_chars = len(raw_prompt)
+        prompt, prompt_compacted = compact_prompt(raw_prompt)
 
-        image_paths = list(args.images or [])
-        if args.expected_images is not None:
-            if args.expected_images < 1 or args.expected_images > MAX_INPUT_IMAGES:
-                raise ImageGenError(
-                    f"Expected image count must be between 1 and {MAX_INPUT_IMAGES}"
+        quality = validate_quality(args.quality)
+        aspect_ratio = validate_aspect_ratio(args.aspect_ratio)
+        aspect_ratio_source = "user" if aspect_ratio != "auto" else "model_default"
+        if args.output_size:
+            try:
+                output_width, output_height = parse_output_size(args.output_size)
+            except PostprocessError as exc:
+                raise ImageGenError(str(exc)) from exc
+            if args.size is None:
+                longest = max(output_width, output_height)
+                requested_size = "1K" if longest <= 1024 else "2K" if longest <= 2048 else "4K"
+            if aspect_ratio == "auto":
+                aspect_ratio = (
+                    "1:1"
+                    if output_width == output_height
+                    else "3:2"
+                    if output_width > output_height
+                    else "2:3"
                 )
-            if len(image_paths) != args.expected_images:
-                missing = max(args.expected_images - len(image_paths), 0)
-                raise ImageGenError(
-                    "Current-message attachment count mismatch: "
-                    f"expected {args.expected_images}, received {len(image_paths)}, "
-                    f"missing {missing}; no image request was sent"
-                )
-        if args.mode == "generate" and (image_paths or args.mask):
-            raise ImageGenError("--mode generate cannot be combined with --image or --mask")
-        if args.mode == "edit" and not image_paths:
-            raise ImageGenError("--mode edit requires at least one --image file")
+                aspect_ratio_source = "output_size"
+        if image_paths and reference_urls:
+            raise ImageGenError("Use --image or --reference-url, not both")
+        if args.mode == "generate" and (image_paths or reference_urls or args.mask):
+            raise ImageGenError("--mode generate cannot be combined with reference images")
+        if args.mode == "edit" and not (image_paths or reference_urls):
+            raise ImageGenError("--mode edit requires --image or --reference-url")
         if args.mask and not image_paths:
-            raise ImageGenError("--mask requires at least one --image file")
-        if len(image_paths) > MAX_INPUT_IMAGES:
-            raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
+            raise ImageGenError("--mask requires at least one local --image")
+        if args.mask and not mask_support_enabled(model):
+            raise ImageGenError(
+                "当前模型编辑通道未启用本地遮罩；本次请求未发送，也不会扣费。"
+                "请移除 --mask，使用整图参考编辑，并在提示词中说明需要修改的区域。"
+                f"仅当中转站确认该模型支持 mask 后，才可设置 {MASK_SUPPORT_ENV}=1。"
+            )
+        if len(image_paths) + len(reference_urls) > MAX_INPUT_IMAGES:
+            raise ImageGenError(f"At most {MAX_INPUT_IMAGES} reference images are supported")
+        if args.webhook and not args.async_mode:
+            raise ImageGenError("--webhook requires --async")
+        if args.metadata:
+            try:
+                metadata = json.loads(args.metadata)
+            except json.JSONDecodeError as exc:
+                raise ImageGenError("--metadata must be a valid JSON object") from exc
+            if not isinstance(metadata, dict):
+                raise ImageGenError("--metadata must be a JSON object")
+        else:
+            metadata = None
+        if image_paths and (args.stream or args.async_mode) and model not in {
+            "gpt-image-2",
+            "gpt-image-2-pro",
+        }:
+            raise ImageGenError(
+                "This relay only supports --stream/--async for local GPT Image 2 edits"
+            )
 
-        mode = "edit" if image_paths else "generate"
-        aspect_ratio = default_aspect_ratio(requested_size, args.aspect_ratio)
-        size = edit_working_size(requested_size) if mode == "edit" else requested_size
-        input_bytes = _input_image_bytes(image_paths, args.mask) if image_paths else 0
+        mode = "edit" if (image_paths or reference_urls) else "generate"
+        if image_paths and aspect_ratio == "auto":
+            aspect_ratio, aspect_ratio_source = resolve_aspect_ratio(
+                aspect_ratio, image_paths
+            )
+        edit_input_size = None
+        input_bytes = None
+        if image_paths:
+            input_bytes = _input_image_bytes(image_paths, args.mask)
+            edit_input_size = legacy_pixel_size(requested_size, aspect_ratio)
+            size = edit_input_size
+            size = edit_working_size(size, model)
+        else:
+            size = requested_size
+            if reference_urls:
+                edit_input_size = requested_size
+
+        requested_async = args.async_mode
         auto_async = bool(
             image_paths
+            and input_bytes is not None
             and should_auto_async_local_edit(
-                size, model, len(image_paths), input_bytes, bool(args.mask)
+                size,
+                model,
+                len(image_paths),
+                input_bytes,
+                bool(args.mask),
             )
         )
-        async_mode = bool(args.async_mode or auto_async)
-        fingerprint = request_fingerprint(
-            prompt,
-            model,
-            size,
-            mode,
-            args.quality or "",
-            image_paths,
-            args.mask,
-            args.n,
-            args.sequence,
-        )
-        output_dir = args.out_dir or (
-            Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
-        )
-        ready = _ready_marker(output_dir, request_id)
-        running, execution_id, existing_result = _reserve_request(
-            output_dir, request_id, args.allow_repeat, args.timeout, fingerprint
-        )
-        if existing_result is not None:
-            print(json.dumps(existing_result, ensure_ascii=False), flush=True)
-            return 0
-        options = _option_fields(args.quality, args.background, args.input_fidelity)
-        if aspect_ratio:
-            options["aspect_ratio"] = aspect_ratio
-        # A sequence is one local coordinator process containing distinct,
-        # ordered upstream page requests. Generic multi-output requests remain
-        # independent variants and keep using their original inputs.
-        chain_outputs = args.sequence and args.n > 1
-        current_image_paths = list(image_paths)
-        current_mask_path = args.mask
-        files: list[str] = []
-        image_info: list[dict[str, int | str]] = []
-        partial_error = ""
-        failed_output = None
-        for output_index in range(1, args.n + 1):
-            _refresh_request_reservation(
-                running, request_id, execution_id, args.timeout, fingerprint
+        async_mode = args.async_mode or auto_async
+        async_reason = "large_local_edit" if auto_async else None
+        async_fallback = None
+        if image_paths and args.metadata and auto_async:
+            raise ImageGenError(
+                "Metadata for a large local edit requires explicit --async; "
+                "the automatic async path does not attach metadata to multipart requests"
             )
-            try:
-                output_prompt, sequence_compacted = sequence_page_prompt(
-                    prompt, output_index, args.n
-                ) if chain_outputs else (prompt, False)
-                prompt_compacted = prompt_compacted or sequence_compacted
-                output_mode = (
-                    "edit" if chain_outputs and output_index > 1 else mode
-                )
-                output_options = dict(options)
-                output_async = bool(
-                    args.async_mode or (output_index == 1 and auto_async)
-                )
-                if output_async:
-                    output_options["async"] = "true"
-                if output_mode == "edit":
-                    result = call_edit_api(
-                        edit_url,
-                        key,
-                        model,
-                        output_prompt,
-                        size,
-                        1,
-                        current_image_paths,
-                        current_mask_path,
-                        args.timeout,
-                        output_options,
-                    )
-                    if output_async:
-                        result = wait_for_task(result, generation_url, key, args.timeout)
-                else:
-                    result = call_api(
-                        generation_url,
-                        key,
-                        model,
-                        output_prompt,
-                        size,
-                        1,
-                        args.timeout,
-                        output_options,
-                        aspect_ratio=aspect_ratio,
-                        async_mode=output_async,
-                    )
-                    if output_async:
-                        result = wait_for_task(result, generation_url, key, args.timeout)
-                one_result = dict(result)
-                one_result["data"] = result["data"][:1]
-                saved_files, saved_info = save_images(
-                    one_result,
-                    edit_url if output_mode == "edit" else generation_url,
-                    key,
-                    output_dir,
-                    args.timeout,
-                )
-            except ImageGenError as exc:
-                if not files:
-                    raise
-                partial_error = str(exc)
-                failed_output = output_index
-                break
 
-            files.extend(saved_files)
-            image_info.extend(saved_info)
-            if chain_outputs:
-                # The next frame must inherit only the image that was just
-                # saved. Never resend the original reference set, and never
-                # discover a candidate by scanning a directory.
-                current_image_paths = list(saved_files)
-                current_mask_path = None
-            if args.n > 1:
-                print(
-                    json.dumps(
-                        {
-                            "ok": True,
-                            "event": "image_saved",
-                            "complete": False,
-                            "request_id": request_id,
-                            "execution_id": execution_id,
-                            "image_index": len(files),
-                            "requested_count": args.n,
-                            "preview_file": preview_paths(saved_files)[0],
-                            "download_file": preview_paths(saved_files)[0],
-                            "image_info": saved_info[0],
-                            "result_ref": {
-                                "scope": "current-conversation",
-                                "request_id": request_id,
-                                "execution_id": execution_id,
-                                "request_fingerprint": fingerprint,
-                                "files": preview_paths(saved_files),
-                            },
-                        },
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
-                )
+        options = _option_fields(quality, args.background, args.input_fidelity)
+        if image_paths:
+            # The pinned relay can convert GPT Image 2 multipart edits to its
+            # JSON reference-image flow, so preserve the requested ratio in
+            # the multipart fields as well. Older multipart providers may
+            # ignore this extra field.
+            options["aspect_ratio"] = aspect_ratio
+            if args.stream:
+                options["stream"] = "true"
+            if async_mode:
+                options["async"] = "true"
+            result = call_edit_api(
+                edit_url,
+                key,
+                model,
+                prompt,
+                size,
+                args.n,
+                image_paths,
+                args.mask,
+                args.timeout,
+                options,
+            )
+            result_endpoint = generation_url if async_mode else edit_url
+            if async_mode:
+                result = wait_for_task(result, generation_url, key, args.timeout)
+        else:
+            options["aspect_ratio"] = aspect_ratio
+            result = call_api(
+                generation_url,
+                key,
+                model,
+                prompt,
+                size,
+                args.n,
+                args.timeout,
+                options,
+                aspect_ratio=aspect_ratio,
+                image_urls=reference_urls or None,
+                stream=args.stream,
+                async_mode=async_mode,
+                webhook=args.webhook or "",
+                metadata=metadata,
+            )
+            result_endpoint = generation_url
+            if async_mode:
+                result = wait_for_task(result, generation_url, key, args.timeout)
+        files = save_images(
+            result,
+            result_endpoint,
+            key,
+            output_dir,
+            args.timeout,
+        )
         original_files = preview_paths(files)
-        processed_files = original_files.copy()
+        processed_files = files.copy()
         postprocess_requested = bool(
             args.output_size
             or args.crop
@@ -1314,11 +1511,13 @@ def main() -> int:
             or args.output_quality is not None
             or args.output_background
         )
-        if postprocess_requested and files:
+        postprocess_manifest = None
+        if postprocess_requested:
+            processed_dir = args.postprocess_dir or (output_dir / "processed")
             try:
                 processed = process_many(
                     files,
-                    args.out_dir or (output_dir / "processed"),
+                    processed_dir,
                     output_size=args.output_size,
                     fit=args.fit,
                     position=args.position,
@@ -1327,78 +1526,84 @@ def main() -> int:
                     quality=args.output_quality or 90,
                     background_color=args.output_background,
                 )
-                processed_files = preview_paths([item["output"] for item in processed])
             except PostprocessError as exc:
-                partial_error = str(exc)
-        preview_files = processed_files
-        download_files = processed_files.copy()
-        result_payload = {
-            "ok": True,
-            "event": "complete",
-            "complete": not partial_error,
-            "request_id": request_id,
-            "execution_id": execution_id,
-            "request_fingerprint": fingerprint,
-            "mode": mode,
-            "model": model,
-            "skill_version": SKILL_VERSION,
-            "quality": args.quality.strip() if args.quality else None,
-            "count": len(files),
-            "requested_count": args.n,
-            "partial": bool(partial_error),
-            "failed_output": failed_output,
-            "error": partial_error or None,
-            "size": size,
-            "requested_size": requested_size,
-            "edit_size": size if mode == "edit" else None,
-            "resized_for_edit": mode == "edit" and size != requested_size,
-            "input_images": len(image_paths),
-            "sequence": args.sequence,
-            "chained_outputs": chain_outputs,
-            "input_bytes": input_bytes,
-            "prompt_compacted": prompt_compacted,
-            "prompt_rewritten": prompt_rewritten,
-            "async": async_mode,
-            "async_auto": auto_async,
-            "mask": bool(args.mask),
-            "files": files,
-            "original_files": original_files,
-            "processed_files": processed_files,
-            "preview_files": preview_files,
-            "download_files": download_files,
-            "image_info": image_info,
-            "result_ref": {
-                "scope": "current-conversation",
-                "request_id": request_id,
-                "execution_id": execution_id,
-                "request_fingerprint": fingerprint,
-                "files": preview_files,
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": f"图片已生成，但本地后处理失败；原始图片仍保留在 {output_dir}: {exc}",
+                            "mode": mode,
+                            "model": model,
+                            "original_files": original_files,
+                            "processed_files": [],
+                            "postprocess": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            processed_files = [item["output"] for item in processed]
+            postprocess_manifest = str(Path(processed_dir).resolve() / "postprocess-manifest.json")
+        preview_files = preview_paths(processed_files)
+        download_files = preview_files.copy()
+        emit_success(
+            {
+                "ok": True,
+                "skill_name": SKILL_NAME,
+                "version": SKILL_VERSION,
+                "mode": mode,
+                "model": model,
+                "count": len(files),
+                "prompt_limit": PROMPT_MAX_CHARS,
+                "prompt_compacted": prompt_compacted,
+                "prompt_original_chars": original_prompt_chars,
+                "prompt_chars": len(prompt),
+                "size": size,
+                "requested_size": requested_size,
+                "edit_size": size if mode == "edit" else None,
+                "resized_for_edit": mode == "edit" and size != edit_input_size,
+                "quality": quality,
+                "aspect_ratio": aspect_ratio,
+                "aspect_ratio_source": aspect_ratio_source,
+                "async": async_mode,
+                "async_requested": requested_async,
+                "async_auto": auto_async,
+                "async_reason": async_reason,
+                "async_fallback": async_fallback,
+                "stream": args.stream,
+                "input_images": len(image_paths) + len(reference_urls),
+                "input_bytes": input_bytes,
+                "mask": bool(args.mask),
+                "files": files,
+                "original_files": original_files,
+                "processed_files": processed_files,
+                "postprocess": postprocess_requested,
+                "postprocess_manifest": postprocess_manifest,
+                "preview_files": preview_files,
+                "download_files": download_files,
             },
-        }
-
-        # Write the marker before announcing success so retries remain bound to
-        # this request. A marker failure must not hide a successfully saved
-        # image from Codex, so the success JSON is always emitted next.
-        try:
-            _write_sidecar(ready, result_payload)
-        except Exception:
-            pass
-        print(json.dumps(result_payload, ensure_ascii=False), flush=True)
-        # Hiding is cosmetic and must never delay or suppress the success JSON.
-        try:
-            _hide_sidecar(ready)
-        except Exception:
-            pass
+            output_dir,
+            task_id,
+            request_started_at_ms,
+        )
         return 0
     except ImageGenError as exc:
         print(
-            json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False),
+            json.dumps(
+                {
+                    "ok": False,
+                    "skill_name": SKILL_NAME,
+                    "version": SKILL_VERSION,
+                    "task_id": task_id,
+                    "request_started_at_ms": request_started_at_ms,
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+            ),
             file=sys.stderr,
         )
         return 1
-    finally:
-        if "running" in locals() and running is not None:
-            _release_request(running)
 
 
 if __name__ == "__main__":

@@ -29,13 +29,11 @@ fi
 
 umask 077
 {
-  printf '%s\n' 'IMAGEGEN_BASE_URL=https://eos.manyuvip.com'
   printf 'IMAGEGEN_API_KEY=%s\n' "$API_KEY"
   printf '%s\n' 'IMAGEGEN_MODEL=gpt-image-2'
 } > "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
 
-IMAGEGEN_BASE_URL="https://eos.manyuvip.com" \
 IMAGEGEN_API_KEY="$API_KEY" \
 IMAGEGEN_MODEL="gpt-image-2" \
 python3 "$TARGET/scripts/generate.py" --check-config
@@ -43,5 +41,8 @@ python3 "$TARGET/scripts/generate.py" --check-config
 echo ""
 echo "Matrixapi-imagegen was installed for Codex. Restart Codex before using it."
 echo "Install location: $TARGET"
-echo "The Skill accepts only https://eos.manyuvip.com."
+echo "API URL is fixed inside the Skill: https://eos.manyuvip.com"
+echo "Installed version: 1.8.8"
+echo "Current model: gpt-image-2"
+echo "Supported models: gpt-image-2, gpt-image-2-pro"
 read -r -p "Press Enter to close..."
