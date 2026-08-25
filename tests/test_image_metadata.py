@@ -210,13 +210,25 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(MODULE.main(), 0)
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["skill_version"], "1.8.10")
+        self.assertEqual(payload["skill_version"], "1.8.11")
         self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
 
     def test_portrait_defaults_to_comic_friendly_two_by_three(self):
         self.assertEqual(MODULE.default_aspect_ratio("2160x3840"), "2:3")
         self.assertEqual(MODULE.default_aspect_ratio("2160x3840", "9:16"), "9:16")
         self.assertEqual(MODULE.default_aspect_ratio("3840x2160"), "")
+
+    def test_graphic_injury_language_is_rewritten_once_before_api(self):
+        rewritten, changed = MODULE.sanitize_prompt("a bloody violent fight with a severed limb")
+        self.assertTrue(changed)
+        self.assertNotIn("bloody", rewritten.lower())
+        self.assertNotIn("violent", rewritten.lower())
+        self.assertNotIn("severed", rewritten.lower())
+        self.assertIn("cinematic", rewritten.lower())
+
+    def test_safe_prompt_is_unchanged(self):
+        prompt = "a calm portrait in soft daylight"
+        self.assertEqual(MODULE.sanitize_prompt(prompt), (prompt, False))
 
     def test_five_requested_outputs_run_sequentially_without_a_skill_cap(self):
         with TemporaryDirectory() as output_dir:

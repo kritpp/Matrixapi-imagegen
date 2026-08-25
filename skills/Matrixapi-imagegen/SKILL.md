@@ -48,7 +48,9 @@ Generate or edit images with the bundled script and show the saved result to the
    Require `ok: true`, a matching `request_id`, a non-empty `execution_id`, and a usable preview path. Render each `image_saved` event immediately, including for the first output, then silently continue the same command session. Do not start another command or add progress narration. Treat `event: complete` as the final signal. If it reports `partial: true`, keep and display all completed images and report only the failed scene/output; never retry a billed task automatically. Do not run any directory scan, sort, process check, dimension recheck, marker wait, or extra command after a result event. A prior result may be reused only when the user explicitly refers to the immediately preceding result in this same conversation and its exact `result_ref`/`preview_file` is passed as the next command's `--image`; never use a global latest file, another conversation's result, or an ambiguous multi-image result. A command that is still running can never trigger a retry. These rules apply equally to new images, edits, redraws, and second-pass modifications.
 7. If generation or editing fails, report the sanitized error. Report the requested and actual saved size from the JSON fields. Never reveal, repeat, or inspect API keys in the response. Reject unsupported dimensions and missing input files locally without calling the API.
 
-The installed release is Matrixapi-imagegen 1.8.10. The bundled installer and updater
+Before sending an image request, the script performs one local safety rewrite of graphic injury language into non-graphic cinematic action wording. It does not add retries, extra validation, directory scans, or additional API calls; the original subject, composition, references, size, and output count remain unchanged.
+
+The installed release is Matrixapi-imagegen 1.8.11. The bundled installer and updater
 must be shipped with this same version; after an update, restart Codex before starting
 a new image conversation.
 

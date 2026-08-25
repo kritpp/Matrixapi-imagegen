@@ -39,7 +39,7 @@ MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.8.10"
+SKILL_VERSION = "1.8.11"
 PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
 EDIT_MAX_EDGE = 1792
@@ -251,6 +251,30 @@ def default_aspect_ratio(size: str, requested: str = "") -> str:
         return explicit
     width, height = (int(value) for value in size.split("x"))
     return "2:3" if height > width else ""
+
+
+_SAFETY_PROMPT_REWRITES = (
+    (re.compile(r"(?i)\b(?:bloodied|bloody|bleeding|blood|gore|gory)\b"), "cinematic action"),
+    (re.compile(r"(?i)\b(?:dismemberment|dismembered|decapitation|decapitate|severed limbs?)\b"), "non-graphic action"),
+    (re.compile(r"(?i)\b(?:kill|killing|killed|murder|murdered|massacre|torture|torturing)\b"), "defeat"),
+    (re.compile(r"(?i)\b(?:violent|violence|brutal|brutality)\b"), "dramatic"),
+    (re.compile(r"血腥|血液|流血|鲜血|喷血|肢解|断肢|断头|砍头|斩首|虐杀|屠杀|谋杀|杀死|杀害|暴力|残暴|残忍"), "电影化动作"),
+)
+
+
+def sanitize_prompt(prompt: str) -> tuple[str, bool]:
+    """Rewrite graphic injury language once, locally, without adding a retry."""
+    sanitized = prompt
+    changed = False
+    for pattern, replacement in _SAFETY_PROMPT_REWRITES:
+        sanitized, count = pattern.subn(replacement, sanitized)
+        changed = changed or bool(count)
+    if changed:
+        sanitized = (
+            f"{sanitized.rstrip()}\n"
+            "cinematic, non-graphic action; clean presentation; no injury detail"
+        )
+    return sanitized, changed
 
 
 def compact_prompt(prompt: str) -> tuple[str, bool]:
@@ -1069,7 +1093,8 @@ def main() -> int:
         raw_prompt = (args.prompt or "").strip()
         if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
-        prompt, prompt_compacted = compact_prompt(raw_prompt)
+        prompt, prompt_rewritten = sanitize_prompt(raw_prompt)
+        prompt, prompt_compacted = compact_prompt(prompt)
 
         image_paths = list(args.images or [])
         if args.expected_images is not None:
@@ -1255,6 +1280,7 @@ def main() -> int:
             "input_images": len(image_paths),
             "input_bytes": input_bytes,
             "prompt_compacted": prompt_compacted,
+            "prompt_rewritten": prompt_rewritten,
             "async": async_mode,
             "async_auto": auto_async,
             "mask": bool(args.mask),
