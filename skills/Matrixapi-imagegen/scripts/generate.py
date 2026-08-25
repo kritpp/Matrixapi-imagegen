@@ -39,7 +39,7 @@ MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.8.9"
+SKILL_VERSION = "1.8.10"
 PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
 EDIT_MAX_EDGE = 1792
@@ -242,6 +242,15 @@ def validate_size(size: str) -> str:
 def edit_working_size(size: str) -> str:
     """Preserve the requested edit size; the provider decides its own limits."""
     return validate_size(size)
+
+
+def default_aspect_ratio(size: str, requested: str = "") -> str:
+    """Use a comic-friendly portrait ratio only when the caller omitted one."""
+    explicit = requested.strip()
+    if explicit:
+        return explicit
+    width, height = (int(value) for value in size.split("x"))
+    return "2:3" if height > width else ""
 
 
 def compact_prompt(prompt: str) -> tuple[str, bool]:
@@ -1085,7 +1094,7 @@ def main() -> int:
             raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
 
         mode = "edit" if image_paths else "generate"
-        aspect_ratio = args.aspect_ratio.strip()
+        aspect_ratio = default_aspect_ratio(requested_size, args.aspect_ratio)
         size = edit_working_size(requested_size) if mode == "edit" else requested_size
         input_bytes = _input_image_bytes(image_paths, args.mask) if image_paths else 0
         auto_async = bool(

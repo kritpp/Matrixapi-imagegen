@@ -210,8 +210,13 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(MODULE.main(), 0)
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["skill_version"], "1.8.9")
+        self.assertEqual(payload["skill_version"], "1.8.10")
         self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
+
+    def test_portrait_defaults_to_comic_friendly_two_by_three(self):
+        self.assertEqual(MODULE.default_aspect_ratio("2160x3840"), "2:3")
+        self.assertEqual(MODULE.default_aspect_ratio("2160x3840", "9:16"), "9:16")
+        self.assertEqual(MODULE.default_aspect_ratio("3840x2160"), "")
 
     def test_five_requested_outputs_run_sequentially_without_a_skill_cap(self):
         with TemporaryDirectory() as output_dir:
