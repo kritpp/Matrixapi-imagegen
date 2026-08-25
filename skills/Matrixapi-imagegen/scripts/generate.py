@@ -39,7 +39,7 @@ MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.8.13"
+SKILL_VERSION = "1.8.14"
 PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
 EDIT_MAX_EDGE = 1792
@@ -1145,8 +1145,12 @@ def main() -> int:
         options = _option_fields(args.quality, args.background, args.input_fidelity)
         if aspect_ratio:
             options["aspect_ratio"] = aspect_ratio
-        if async_mode:
-            options["async"] = "true"
+        # A chained reference edit uses the large original reference set only
+        # for its first frame. Later frames use exactly the preceding saved
+        # image, so the provider receives a small, coherent edit request.
+        chain_outputs = mode == "edit" and args.n > 1
+        current_image_paths = list(image_paths)
+        current_mask_path = args.mask
         files: list[str] = []
         image_info: list[dict[str, int | str]] = []
         partial_error = ""
@@ -1156,6 +1160,12 @@ def main() -> int:
                 running, request_id, execution_id, args.timeout, fingerprint
             )
             try:
+                output_options = dict(options)
+                output_async = bool(
+                    args.async_mode or (output_index == 1 and auto_async)
+                )
+                if output_async:
+                    output_options["async"] = "true"
                 if mode == "edit":
                     result = call_edit_api(
                         edit_url,
@@ -1164,12 +1174,12 @@ def main() -> int:
                         prompt,
                         size,
                         1,
-                        image_paths,
-                        args.mask,
+                        current_image_paths,
+                        current_mask_path,
                         args.timeout,
-                        options,
+                        output_options,
                     )
-                    if async_mode:
+                    if output_async:
                         result = wait_for_task(result, generation_url, key, args.timeout)
                 else:
                     result = call_api(
@@ -1180,11 +1190,11 @@ def main() -> int:
                         size,
                         1,
                         args.timeout,
-                        options,
+                        output_options,
                         aspect_ratio=aspect_ratio,
                         async_mode=async_mode,
                     )
-                    if async_mode:
+                    if output_async:
                         result = wait_for_task(result, generation_url, key, args.timeout)
                 one_result = dict(result)
                 one_result["data"] = result["data"][:1]
@@ -1204,6 +1214,12 @@ def main() -> int:
 
             files.extend(saved_files)
             image_info.extend(saved_info)
+            if chain_outputs:
+                # The next frame must inherit only the image that was just
+                # saved. Never resend the original reference set, and never
+                # discover a candidate by scanning a directory.
+                current_image_paths = list(saved_files)
+                current_mask_path = None
             if args.n > 1:
                 print(
                     json.dumps(
@@ -1278,6 +1294,7 @@ def main() -> int:
             "edit_size": size if mode == "edit" else None,
             "resized_for_edit": mode == "edit" and size != requested_size,
             "input_images": len(image_paths),
+            "chained_outputs": chain_outputs,
             "input_bytes": input_bytes,
             "prompt_compacted": prompt_compacted,
             "prompt_rewritten": prompt_rewritten,

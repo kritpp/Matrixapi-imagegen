@@ -210,7 +210,7 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(MODULE.main(), 0)
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["skill_version"], "1.8.13")
+        self.assertEqual(payload["skill_version"], "1.8.14")
         self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
 
     def test_portrait_defaults_to_comic_friendly_two_by_three(self):
@@ -326,6 +326,70 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual([event["image_index"] for event in events[:-1]], [1, 2, 3])
             self.assertEqual(events[-1]["requested_count"], 3)
             self.assertEqual(events[-1]["count"], 3)
+
+    def test_three_page_story_chains_sixteen_references_through_saved_outputs(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            references = []
+            for index in range(16):
+                reference = output_path / f"reference-{index}.png"
+                reference.write_bytes(f"reference-{index}".encode())
+                references.append(str(reference))
+            pages = [output_path / f"page-{index}.png" for index in range(1, 4)]
+            for page in pages:
+                page.write_bytes(b"validated image")
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "sixteen-reference-story-task",
+                "--prompt",
+                "Create three continuous comic pages with the same characters and chronology.",
+                "--expected-images",
+                "16",
+                *sum((["--image", path] for path in references), []),
+                "--size",
+                "2160x3840",
+                "--n",
+                "3",
+                "--out-dir",
+                str(output_path),
+            ]
+            image_info = {
+                "width": 2160,
+                "height": 3840,
+                "format": "PNG",
+                "resolution": "4K",
+            }
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2-pro", "test"),
+                ),
+                mock.patch.object(MODULE, "_input_image_bytes", return_value=16),
+                mock.patch.object(MODULE, "call_edit_api", return_value={"data": [{}]}) as call_edit_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    side_effect=[([str(path)], [image_info]) for path in pages],
+                ),
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            self.assertEqual(call_edit_api.call_count, 3)
+            self.assertEqual(call_edit_api.call_args_list[0].args[6], references)
+            self.assertEqual(call_edit_api.call_args_list[1].args[6], [str(pages[0])])
+            self.assertEqual(call_edit_api.call_args_list[2].args[6], [str(pages[1])])
+            self.assertEqual(call_edit_api.call_args_list[0].args[9].get("async"), "true")
+            self.assertNotIn("async", call_edit_api.call_args_list[1].args[9])
+            self.assertNotIn("async", call_edit_api.call_args_list[2].args[9])
+            events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+            self.assertEqual([event["image_index"] for event in events[:-1]], [1, 2, 3])
+            self.assertEqual(events[-1]["count"], 3)
+            self.assertTrue(events[-1]["chained_outputs"])
 
     def test_later_output_failure_keeps_earlier_saved_image_without_retry(self):
         with TemporaryDirectory() as output_dir:

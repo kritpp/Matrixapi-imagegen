@@ -27,7 +27,7 @@ Generate or edit images with the bundled script and show the saved result to the
    python <skill-directory>/scripts/generate.py --request-id "<task-id>" --prompt "<edit instructions>" --expected-images <attachment-count> --image "<path-1>" --image "<path-2>" --n 1
    ```
 
-   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests a different total output count. For a large local GPT Image 2 edit (6 or more references or at least 48 MiB), the script automatically submits one asynchronous task and polls its status; it never splits the reference set into separate image requests. A story sequence is handled by one unified prompt and the user-requested output count so character design, visual language, and chronology remain shared across the sequence. Each output is still submitted and saved sequentially by the script, and the first completed image is displayed before later outputs finish. When reusing the immediately preceding result, pass its exact path as `--image`; do not run a command to locate that path. If that result contains multiple images, require an explicit image number or exact result reference before editing.
+   For masked local editing, add `--mask "<mask path>"`. Keep `n` at 1 unless the user explicitly requests a different total output count. For a large local GPT Image 2 edit (6 or more references or at least 48 MiB), the script automatically submits the first frame as one asynchronous task and polls its status; it never splits the original reference set into separate first-frame requests. A story/comic sequence uses one unified prompt and the user-requested output count: the first frame receives all supplied references, each saved frame is displayed immediately, and the next frame receives only the immediately preceding saved frame. This preserves character and chronology without resending all 16 references for every frame. A later frame failure stops the sequence and never resubmits an already billed frame. When reusing the immediately preceding result, pass its exact path as `--image`; do not run a command to locate that path. If that result contains multiple images, require an explicit image number or exact result reference before editing.
    Run this script exactly once for the task. If the command tool reports that the
    process is still running, resume or wait on that same command session until it
    exits. A running process with no stdout is not a failed request. Do not start a
@@ -50,7 +50,7 @@ Generate or edit images with the bundled script and show the saved result to the
 
 Before sending an image request, the script performs one local safety rewrite of graphic injury language into non-graphic cinematic action wording. It does not add retries, extra validation, directory scans, or additional API calls; the original subject, composition, references, size, and output count remain unchanged.
 
-The installed release is Matrixapi-imagegen 1.8.13. The bundled installer and updater
+The installed release is Matrixapi-imagegen 1.8.14. The bundled installer and updater
 must be shipped with this same version; after an update, restart Codex before starting
 a new image conversation.
 

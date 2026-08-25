@@ -19,7 +19,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 支持 PNG、JPEG、WebP、AVIF 输出，以及 `--process-only` 处理已有本地图片
 - 后处理保留未修改的上游原图，并生成 JSON 清单记录每次转换
 - 多图输出逐张保存并立即返回；不会限制用户请求的输出数量
-- 连续故事沿用稳定的统一任务流程，逐张保存和返回；任一张失败即停止且不自动重复扣费
+- 连续故事使用一份统一提示词：首张一次接收全部参考图，后续只承接上一张已保存成品；逐张保存和返回，任一张失败即停止且不自动重复扣费
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
@@ -36,7 +36,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 点击下面的链接即可直接从 GitHub 下载最新安装包：
 
-[**一键下载 Matrixapi-imagegen v1.8.13 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.13.zip)
+[**一键下载 Matrixapi-imagegen v1.8.14 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.14.zip)
 
 下载后解压，Windows 双击 `install-windows.bat`；macOS 双击 `install-macos.command`。
 
