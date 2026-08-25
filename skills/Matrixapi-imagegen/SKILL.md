@@ -1,6 +1,6 @@
 ---
 name: Matrixapi-imagegen
-description: Generate or edit bitmap images through the recipient's own OpenAI-compatible Images API, including local reference images and masks, then perform deterministic local resizing, cropping, format conversion, compression, or canvas fitting when requested. Use for requests to generate, create, draw, edit, retouch, inpaint, or make a picture, illustration, poster, wallpaper, concept art, or other raster image, including Chinese prompts such as 生成图片, 画一张图, 生图, 修改这张图, and 局部重绘. Do not use for SVG/code-native graphics.
+description: Generate or edit bitmap images through the recipient's own OpenAI-compatible Images API, perform deterministic local image processing, or update the Matrixapi-imagegen Skill from its fixed GitHub repository. Use for image generation/editing requests and explicit requests such as 更新 Matrixapi-imagegen. Do not use for SVG/code-native graphics.
 ---
 
 # Matrixapi Image Generation
@@ -115,6 +115,27 @@ python <skill-directory>/scripts/generate.py --check-config
 ```
 
 The check reports only whether a supported configuration was found, its generic source type, and the selected model. Do not print the provider name, endpoint, or credential.
+
+## Updating
+
+When the user explicitly asks to update Matrixapi-imagegen, run exactly once:
+
+```text
+python <skill-directory>/scripts/update_skill.py
+```
+
+The updater downloads the highest-versioned `Matrixapi-imagegen-vX.Y.Z.zip` from
+the fixed public GitHub repository. It validates archive paths, file/size limits,
+the package filename against `SKILL_VERSION`, the fixed Matrixapi URL, and all
+required Skill files before replacing anything. It holds an update lock and keeps
+the installed Skill as a rollback backup until the new version passes
+`--check-config`. A failed validation restores the previous version. It does not
+touch generated images, `IMAGEGEN_API_KEY`, `IMAGEGEN_MODEL`, or the local
+`Matrixapi-imagegen.env` file, and it never calls the image generation API.
+
+After a successful update, show the updater's `display_message` exactly, including
+the installed version, current model, supported models, and requirement to restart
+Codex. Do not run the updater more than once for the same user request.
 
 ## Boundaries
 

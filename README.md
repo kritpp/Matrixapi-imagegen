@@ -75,6 +75,22 @@ macOS 一键安装器会将 Key 和模型保存到权限为仅当前用户可读
 python <skill-directory>/scripts/generate.py --check-config
 ```
 
+## 后续自动更新
+
+使用一键安装包或 GitHub 安装完成后，可以在 Codex 中输入：
+
+```text
+更新 Matrixapi-imagegen
+```
+
+Skill 会运行内置 `scripts/update_skill.py`，从本 GitHub 仓库选择版本号最高的
+`Matrixapi-imagegen-vX.Y.Z.zip`。更新器会先校验 ZIP 路径安全、大小、必需文件、
+版本号与固定 URL，再原子替换 Skill；新版本自检通过后才删除回滚备份。任何校验或
+自检失败都会恢复旧版本。
+
+自动更新不会删除历史图片，不会修改 API Key、模型变量或
+`~/.codex/Matrixapi-imagegen.env`，也不会调用生图接口。更新成功后必须重启 Codex。
+
 The fixed API implements:
 
 - `POST /v1/images/generations`
