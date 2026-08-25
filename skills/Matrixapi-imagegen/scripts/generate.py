@@ -39,7 +39,7 @@ MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.8.14"
+SKILL_VERSION = "1.8.15"
 PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
 EDIT_MAX_EDGE = 1792
@@ -288,6 +288,30 @@ def compact_prompt(prompt: str) -> tuple[str, bool]:
     return compacted[:PROMPT_MAX_CHARS], True
 
 
+def sequence_page_prompt(prompt: str, page_index: int, page_count: int) -> tuple[str, bool]:
+    """Bind one API call to one page while preserving the complete story brief."""
+    if page_count <= 1:
+        return prompt, False
+    if page_index == 1:
+        instruction = (
+            f"Sequence page {page_index}/{page_count}: generate only the first page now; "
+            "do not combine later pages into this image."
+        )
+    else:
+        instruction = (
+            f"Sequence page {page_index}/{page_count}: use the attached immediately preceding "
+            "page only for character, visual, and story continuity; generate only this next "
+            "page and do not repeat or combine earlier pages."
+        )
+    available = PROMPT_MAX_CHARS - len(instruction) - 1
+    if len(prompt) <= available:
+        return f"{prompt}\n{instruction}", False
+    head = max(16, int(available * 0.72))
+    tail = max(16, available - head - 1)
+    compacted = f"{prompt[:head].rstrip()}\n{prompt[-tail:].lstrip()}"
+    return f"{compacted[:available]}\n{instruction}", True
+
+
 def request_fingerprint(
     prompt: str,
     model: str,
@@ -296,9 +320,19 @@ def request_fingerprint(
     quality: str,
     image_paths: list[str],
     mask_path: str | None,
+    count: int = 1,
+    sequence: bool = False,
 ) -> str:
     digest = hashlib.sha256()
-    for value in (prompt, model, size, mode, quality or ""):
+    for value in (
+        prompt,
+        model,
+        size,
+        mode,
+        quality or "",
+        str(count),
+        "sequence" if sequence else "independent",
+    ):
         digest.update(value.encode("utf-8"))
         digest.update(b"\0")
     for path in image_paths + ([mask_path] if mask_path else []):
@@ -1005,6 +1039,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--size", default="1024x1024")
     parser.add_argument("--aspect-ratio", default="")
     parser.add_argument("--n", type=int, default=1)
+    parser.add_argument(
+        "--sequence",
+        action="store_true",
+        help=(
+            "Generate a continuous story sequentially: the first page uses all supplied "
+            "references and each later page uses only the immediately preceding saved page"
+        ),
+    )
     parser.add_argument("--quality")
     parser.add_argument("--background")
     parser.add_argument("--input-fidelity")
@@ -1068,6 +1110,8 @@ def main() -> int:
             )
         if args.n < 1:
             raise ImageGenError("Image count must be at least 1")
+        if args.sequence and args.n < 2:
+            raise ImageGenError("--sequence requires --n 2 or greater")
         if args.timeout < 10 or args.timeout > 600:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
         requested_size = validate_size(args.size)
@@ -1130,7 +1174,15 @@ def main() -> int:
         )
         async_mode = bool(args.async_mode or auto_async)
         fingerprint = request_fingerprint(
-            prompt, model, size, mode, args.quality or "", image_paths, args.mask
+            prompt,
+            model,
+            size,
+            mode,
+            args.quality or "",
+            image_paths,
+            args.mask,
+            args.n,
+            args.sequence,
         )
         output_dir = args.out_dir or (
             Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
@@ -1145,10 +1197,10 @@ def main() -> int:
         options = _option_fields(args.quality, args.background, args.input_fidelity)
         if aspect_ratio:
             options["aspect_ratio"] = aspect_ratio
-        # A chained reference edit uses the large original reference set only
-        # for its first frame. Later frames use exactly the preceding saved
-        # image, so the provider receives a small, coherent edit request.
-        chain_outputs = mode == "edit" and args.n > 1
+        # A sequence is one local coordinator process containing distinct,
+        # ordered upstream page requests. Generic multi-output requests remain
+        # independent variants and keep using their original inputs.
+        chain_outputs = args.sequence and args.n > 1
         current_image_paths = list(image_paths)
         current_mask_path = args.mask
         files: list[str] = []
@@ -1160,18 +1212,25 @@ def main() -> int:
                 running, request_id, execution_id, args.timeout, fingerprint
             )
             try:
+                output_prompt, sequence_compacted = sequence_page_prompt(
+                    prompt, output_index, args.n
+                ) if chain_outputs else (prompt, False)
+                prompt_compacted = prompt_compacted or sequence_compacted
+                output_mode = (
+                    "edit" if chain_outputs and output_index > 1 else mode
+                )
                 output_options = dict(options)
                 output_async = bool(
                     args.async_mode or (output_index == 1 and auto_async)
                 )
                 if output_async:
                     output_options["async"] = "true"
-                if mode == "edit":
+                if output_mode == "edit":
                     result = call_edit_api(
                         edit_url,
                         key,
                         model,
-                        prompt,
+                        output_prompt,
                         size,
                         1,
                         current_image_paths,
@@ -1186,13 +1245,13 @@ def main() -> int:
                         generation_url,
                         key,
                         model,
-                        prompt,
+                        output_prompt,
                         size,
                         1,
                         args.timeout,
                         output_options,
                         aspect_ratio=aspect_ratio,
-                        async_mode=async_mode,
+                        async_mode=output_async,
                     )
                     if output_async:
                         result = wait_for_task(result, generation_url, key, args.timeout)
@@ -1200,7 +1259,7 @@ def main() -> int:
                 one_result["data"] = result["data"][:1]
                 saved_files, saved_info = save_images(
                     one_result,
-                    edit_url if mode == "edit" else generation_url,
+                    edit_url if output_mode == "edit" else generation_url,
                     key,
                     output_dir,
                     args.timeout,
@@ -1294,6 +1353,7 @@ def main() -> int:
             "edit_size": size if mode == "edit" else None,
             "resized_for_edit": mode == "edit" and size != requested_size,
             "input_images": len(image_paths),
+            "sequence": args.sequence,
             "chained_outputs": chain_outputs,
             "input_bytes": input_bytes,
             "prompt_compacted": prompt_compacted,

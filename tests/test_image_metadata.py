@@ -210,7 +210,7 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(MODULE.main(), 0)
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["skill_version"], "1.8.14")
+        self.assertEqual(payload["skill_version"], "1.8.15")
         self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
 
     def test_portrait_defaults_to_comic_friendly_two_by_three(self):
@@ -278,7 +278,7 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(events[-1]["count"], 5)
             self.assertFalse(events[-1]["partial"])
 
-    def test_three_page_story_uses_one_unified_prompt_and_returns_each_page(self):
+    def test_three_page_story_uses_distinct_ordered_requests_and_returns_each_page(self):
         with TemporaryDirectory() as output_dir:
             output_path = Path(output_dir)
             image_paths = [output_path / f"page-{index}.png" for index in range(1, 4)]
@@ -293,6 +293,7 @@ class ImageMetadataTests(unittest.TestCase):
                 "Create three continuous portrait comic pages: page one begins the confrontation, page two advances the same confrontation, page three resolves it; same characters, costume, visual language, and chronology across all pages.",
                 "--n",
                 "3",
+                "--sequence",
                 "--out-dir",
                 str(output_path),
             ]
@@ -311,6 +312,9 @@ class ImageMetadataTests(unittest.TestCase):
                 ),
                 mock.patch.object(MODULE, "call_api", return_value={"data": [{}]}) as call_api,
                 mock.patch.object(
+                    MODULE, "call_edit_api", return_value={"data": [{}]}
+                ) as call_edit_api,
+                mock.patch.object(
                     MODULE,
                     "save_images",
                     side_effect=[([str(path)], [image_info]) for path in image_paths],
@@ -319,9 +323,15 @@ class ImageMetadataTests(unittest.TestCase):
             ):
                 self.assertEqual(MODULE.main(), 0)
 
-            self.assertEqual(call_api.call_count, 3)
-            self.assertTrue(all(call.args[3] == call_api.call_args_list[0].args[3] for call in call_api.call_args_list))
-            self.assertTrue(all(call.args[5] == 1 for call in call_api.call_args_list))
+            self.assertEqual(call_api.call_count, 1)
+            self.assertEqual(call_edit_api.call_count, 2)
+            self.assertIn("Sequence page 1/3", call_api.call_args.args[3])
+            self.assertIn("Sequence page 2/3", call_edit_api.call_args_list[0].args[3])
+            self.assertIn("Sequence page 3/3", call_edit_api.call_args_list[1].args[3])
+            self.assertEqual(call_edit_api.call_args_list[0].args[6], [str(image_paths[0])])
+            self.assertEqual(call_edit_api.call_args_list[1].args[6], [str(image_paths[1])])
+            self.assertEqual(call_api.call_args.args[5], 1)
+            self.assertTrue(all(call.args[5] == 1 for call in call_edit_api.call_args_list))
             events = [json.loads(line) for line in stdout.getvalue().splitlines()]
             self.assertEqual([event["image_index"] for event in events[:-1]], [1, 2, 3])
             self.assertEqual(events[-1]["requested_count"], 3)
@@ -352,6 +362,7 @@ class ImageMetadataTests(unittest.TestCase):
                 "2160x3840",
                 "--n",
                 "3",
+                "--sequence",
                 "--out-dir",
                 str(output_path),
             ]
@@ -383,6 +394,12 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(call_edit_api.call_args_list[0].args[6], references)
             self.assertEqual(call_edit_api.call_args_list[1].args[6], [str(pages[0])])
             self.assertEqual(call_edit_api.call_args_list[2].args[6], [str(pages[1])])
+            self.assertIn("Sequence page 1/3", call_edit_api.call_args_list[0].args[3])
+            self.assertIn("Sequence page 2/3", call_edit_api.call_args_list[1].args[3])
+            self.assertIn("Sequence page 3/3", call_edit_api.call_args_list[2].args[3])
+            self.assertTrue(
+                all(call.args[5] == 1 for call in call_edit_api.call_args_list)
+            )
             self.assertEqual(call_edit_api.call_args_list[0].args[9].get("async"), "true")
             self.assertNotIn("async", call_edit_api.call_args_list[1].args[9])
             self.assertNotIn("async", call_edit_api.call_args_list[2].args[9])
@@ -390,6 +407,140 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual([event["image_index"] for event in events[:-1]], [1, 2, 3])
             self.assertEqual(events[-1]["count"], 3)
             self.assertTrue(events[-1]["chained_outputs"])
+
+    def test_multiple_edit_variants_do_not_chain_without_sequence(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            reference = output_path / "reference.png"
+            reference.write_bytes(b"reference")
+            outputs = [output_path / f"variant-{index}.png" for index in range(1, 4)]
+            for output in outputs:
+                output.write_bytes(b"validated image")
+            argv = [
+                "generate.py",
+                "--request-id",
+                "independent-edit-variants",
+                "--prompt",
+                "Create three independent poster variants",
+                "--image",
+                str(reference),
+                "--n",
+                "3",
+                "--out-dir",
+                str(output_path),
+            ]
+            image_info = {
+                "width": 1024,
+                "height": 1024,
+                "format": "PNG",
+                "resolution": "1K",
+            }
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=(
+                        "https://eos.manyuvip.com",
+                        "test-key",
+                        "gpt-image-2",
+                        "test",
+                    ),
+                ),
+                mock.patch.object(MODULE, "_input_image_bytes", return_value=1),
+                mock.patch.object(
+                    MODULE, "call_edit_api", return_value={"data": [{}]}
+                ) as call_edit_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    side_effect=[([str(path)], [image_info]) for path in outputs],
+                ),
+                mock.patch.object(sys, "stdout", io.StringIO()),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            self.assertEqual(call_edit_api.call_count, 3)
+            self.assertTrue(
+                all(call.args[6] == [str(reference)] for call in call_edit_api.call_args_list)
+            )
+            self.assertTrue(
+                all("Sequence page" not in call.args[3] for call in call_edit_api.call_args_list)
+            )
+
+    def test_sequence_stops_after_failed_page_without_resubmitting_success(self):
+        with TemporaryDirectory() as output_dir:
+            output_path = Path(output_dir)
+            references = []
+            for index in range(16):
+                reference = output_path / f"reference-{index}.png"
+                reference.write_bytes(f"reference-{index}".encode())
+                references.append(str(reference))
+            first_page = output_path / "page-1.png"
+            first_page.write_bytes(b"validated image")
+            stdout = io.StringIO()
+            argv = [
+                "generate.py",
+                "--request-id",
+                "stop-sequence-after-page-two-failure",
+                "--prompt",
+                "A complete three-page story brief.",
+                "--expected-images",
+                "16",
+                *sum((["--image", path] for path in references), []),
+                "--sequence",
+                "--n",
+                "3",
+                "--out-dir",
+                str(output_path),
+            ]
+            image_info = {
+                "width": 2160,
+                "height": 3840,
+                "format": "PNG",
+                "resolution": "4K",
+            }
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MODULE,
+                    "discover_credentials",
+                    return_value=(
+                        "https://eos.manyuvip.com",
+                        "test-key",
+                        "gpt-image-2-pro",
+                        "test",
+                    ),
+                ),
+                mock.patch.object(MODULE, "_input_image_bytes", return_value=16),
+                mock.patch.object(
+                    MODULE,
+                    "call_edit_api",
+                    side_effect=[
+                        {"data": [{}]},
+                        MODULE.ImageGenError("second page failed"),
+                    ],
+                ) as call_edit_api,
+                mock.patch.object(
+                    MODULE,
+                    "save_images",
+                    return_value=([str(first_page)], [image_info]),
+                ) as save_images,
+                mock.patch.object(sys, "stdout", stdout),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            self.assertEqual(call_edit_api.call_count, 2)
+            self.assertEqual(save_images.call_count, 1)
+            self.assertEqual(call_edit_api.call_args_list[0].args[6], references)
+            self.assertEqual(call_edit_api.call_args_list[1].args[6], [str(first_page)])
+            events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+            self.assertEqual(events[0]["event"], "image_saved")
+            self.assertEqual(events[0]["image_index"], 1)
+            self.assertEqual(events[-1]["event"], "complete")
+            self.assertTrue(events[-1]["partial"])
+            self.assertEqual(events[-1]["failed_output"], 2)
+            self.assertEqual(events[-1]["count"], 1)
 
     def test_later_output_failure_keeps_earlier_saved_image_without_retry(self):
         with TemporaryDirectory() as output_dir:

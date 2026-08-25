@@ -19,7 +19,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 - 支持 PNG、JPEG、WebP、AVIF 输出，以及 `--process-only` 处理已有本地图片
 - 后处理保留未修改的上游原图，并生成 JSON 清单记录每次转换
 - 多图输出逐张保存并立即返回；不会限制用户请求的输出数量
-- 连续故事使用一份统一提示词：首张一次接收全部参考图，后续只承接上一张已保存成品；逐张保存和返回，任一张失败即停止且不自动重复扣费
+- 连续故事使用一份完整故事提示词并按页发起独立请求：第 1 页一次接收全部参考图，第 2 页只参考第 1 页成品，第 3 页只参考第 2 页成品，后续依次承接；每页保存后立即返回，任一页失败即停止且不自动重复扣费
 
 - Text-to-image generation via `POST /v1/images/generations`
 - Reference-image editing via `POST /v1/images/edits`
@@ -36,7 +36,7 @@ This repository distributes a Codex Skill for image generation and editing throu
 
 点击下面的链接即可直接从 GitHub 下载最新安装包：
 
-[**一键下载 Matrixapi-imagegen v1.8.14 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.14.zip)
+[**一键下载 Matrixapi-imagegen v1.8.15 安装包**](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.15.zip)
 
 下载后解压，Windows 双击 `install-windows.bat`；macOS 双击 `install-macos.command`。
 
@@ -127,7 +127,7 @@ Skill 会从本仓库获取最新版，替换自身文件并保留本机 API 配
 
 普通请求使用快速路径，不做 OCR、自动重试或额外检查。只有明确输入“精准文字”或“精准重绘”时，Skill 才启用更高质量和更高参考图保真度参数；这些模式可能更慢。
 
-连续漫画、故事或分镜沿用稳定的统一提示词和输出数量流程，人物、服装、画风、场景与时间顺序在同一任务中保持一致。图片逐张保存并立即返回；某一张失败后停止后续提交，成功图片保留，且不会自动重试产生费用。
+连续漫画、故事或分镜使用一个完整故事要求，但每一页都是独立且有顺序的上游请求：第 1 页使用全部原始参考图，第 2 页仅使用第 1 页成品，第 3 页仅使用第 2 页成品。每页只生成当前页，保存后立即返回；某一页失败后停止后续提交，成功图片保留，且不会自动重试产生费用。
 
 生成成功后，Skill 会检查实际图片文件，并显示真实尺寸、文件格式、图片预览和本地保存路径。原图链接会按真实尺寸显示为“点击打开或下载 1K 原图”“点击打开或下载 2K 原图”或“点击打开或下载 4K 原图”。
 
