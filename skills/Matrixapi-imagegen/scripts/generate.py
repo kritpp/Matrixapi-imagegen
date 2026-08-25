@@ -39,7 +39,7 @@ MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
-SKILL_VERSION = "1.8.12"
+SKILL_VERSION = "1.8.13"
 PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
 EDIT_MAX_EDGE = 1792
@@ -978,16 +978,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prompt")
     parser.add_argument(
-        "--output-prompt",
-        dest="output_prompts",
-        action="append",
-        metavar="PROMPT",
-        help=(
-            "Distinct prompt for one ordered output; repeat once per story page or scene. "
-            "The optional --prompt value is used only as shared continuity context."
-        ),
-    )
-    parser.add_argument(
         "--image",
         "--reference-image",
         dest="images",
@@ -1014,7 +1004,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--size", default="1024x1024")
     parser.add_argument("--aspect-ratio", default="")
-    parser.add_argument("--n", type=int)
+    parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality")
     parser.add_argument("--background")
     parser.add_argument("--input-fidelity")
@@ -1076,7 +1066,7 @@ def main() -> int:
             raise ImageGenError(
                 "Request ID must contain only letters, numbers, dots, underscores, or hyphens"
             )
-        if args.n is not None and args.n < 1:
+        if args.n < 1:
             raise ImageGenError("Image count must be at least 1")
         if args.timeout < 10 or args.timeout > 600:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
@@ -1101,43 +1091,10 @@ def main() -> int:
             return 0
 
         raw_prompt = (args.prompt or "").strip()
-        raw_output_prompts = [value.strip() for value in (args.output_prompts or [])]
-        if any(not value for value in raw_output_prompts):
-            raise ImageGenError("Each output prompt must not be empty")
-        if not raw_prompt and not raw_output_prompts:
+        if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
-        if raw_output_prompts:
-            requested_count = len(raw_output_prompts)
-            if args.n is not None and args.n != requested_count:
-                raise ImageGenError(
-                    "Image count must match the number of distinct output prompts"
-                )
-            combined_prompts = []
-            for output_prompt in raw_output_prompts:
-                if raw_prompt:
-                    combined_prompts.append(
-                        "CURRENT OUTPUT ONLY:\n"
-                        f"{output_prompt}\n\n"
-                        "SHARED CONTINUITY (do not depict other pages or scenes):\n"
-                        f"{raw_prompt}"
-                    )
-                else:
-                    combined_prompts.append(output_prompt)
-            prompt_mode = "per-output"
-        else:
-            requested_count = args.n if args.n is not None else 1
-            combined_prompts = [raw_prompt] * requested_count
-            prompt_mode = "shared"
-
-        prompts = []
-        prompt_rewritten = False
-        prompt_compacted = False
-        for combined_prompt in combined_prompts:
-            prepared_prompt, rewritten = sanitize_prompt(combined_prompt)
-            prepared_prompt, compacted = compact_prompt(prepared_prompt)
-            prompts.append(prepared_prompt)
-            prompt_rewritten = prompt_rewritten or rewritten
-            prompt_compacted = prompt_compacted or compacted
+        prompt, prompt_rewritten = sanitize_prompt(raw_prompt)
+        prompt, prompt_compacted = compact_prompt(prompt)
 
         image_paths = list(args.images or [])
         if args.expected_images is not None:
@@ -1173,13 +1130,7 @@ def main() -> int:
         )
         async_mode = bool(args.async_mode or auto_async)
         fingerprint = request_fingerprint(
-            json.dumps(prompts, ensure_ascii=False, separators=(",", ":")),
-            model,
-            size,
-            mode,
-            args.quality or "",
-            image_paths,
-            args.mask,
+            prompt, model, size, mode, args.quality or "", image_paths, args.mask
         )
         output_dir = args.out_dir or (
             Path.home() / ".codex" / "generated_images" / "Matrixapi-imagegen"
@@ -1200,7 +1151,7 @@ def main() -> int:
         image_info: list[dict[str, int | str]] = []
         partial_error = ""
         failed_output = None
-        for output_index, prompt in enumerate(prompts, start=1):
+        for output_index in range(1, args.n + 1):
             _refresh_request_reservation(
                 running, request_id, execution_id, args.timeout, fingerprint
             )
@@ -1253,7 +1204,7 @@ def main() -> int:
 
             files.extend(saved_files)
             image_info.extend(saved_info)
-            if requested_count > 1:
+            if args.n > 1:
                 print(
                     json.dumps(
                         {
@@ -1263,7 +1214,7 @@ def main() -> int:
                             "request_id": request_id,
                             "execution_id": execution_id,
                             "image_index": len(files),
-                            "requested_count": requested_count,
+                            "requested_count": args.n,
                             "preview_file": preview_paths(saved_files)[0],
                             "download_file": preview_paths(saved_files)[0],
                             "image_info": saved_info[0],
@@ -1318,7 +1269,7 @@ def main() -> int:
             "skill_version": SKILL_VERSION,
             "quality": args.quality.strip() if args.quality else None,
             "count": len(files),
-            "requested_count": requested_count,
+            "requested_count": args.n,
             "partial": bool(partial_error),
             "failed_output": failed_output,
             "error": partial_error or None,
@@ -1330,7 +1281,6 @@ def main() -> int:
             "input_bytes": input_bytes,
             "prompt_compacted": prompt_compacted,
             "prompt_rewritten": prompt_rewritten,
-            "prompt_mode": prompt_mode,
             "async": async_mode,
             "async_auto": auto_async,
             "mask": bool(args.mask),

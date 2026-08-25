@@ -210,7 +210,7 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(MODULE.main(), 0)
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["skill_version"], "1.8.12")
+        self.assertEqual(payload["skill_version"], "1.8.13")
         self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
 
     def test_portrait_defaults_to_comic_friendly_two_by_three(self):
@@ -278,7 +278,7 @@ class ImageMetadataTests(unittest.TestCase):
             self.assertEqual(events[-1]["count"], 5)
             self.assertFalse(events[-1]["partial"])
 
-    def test_ordered_story_uses_one_distinct_prompt_per_output(self):
+    def test_three_page_story_uses_one_unified_prompt_and_returns_each_page(self):
         with TemporaryDirectory() as output_dir:
             output_path = Path(output_dir)
             image_paths = [output_path / f"page-{index}.png" for index in range(1, 4)]
@@ -288,15 +288,11 @@ class ImageMetadataTests(unittest.TestCase):
             argv = [
                 "generate.py",
                 "--request-id",
-                "ordered-story-task",
+                "three-page-story-task",
                 "--prompt",
-                "Keep the same hero, costume, cinematic style, and chronology.",
-                "--output-prompt",
-                "Page 1 only: the hero arrives at the city gate.",
-                "--output-prompt",
-                "Page 2 only: the same hero enters the city.",
-                "--output-prompt",
-                "Page 3 only: the same hero reaches the tower.",
+                "Create three continuous portrait comic pages: page one begins the confrontation, page two advances the same confrontation, page three resolves it; same characters, costume, visual language, and chronology across all pages.",
+                "--n",
+                "3",
                 "--out-dir",
                 str(output_path),
             ]
@@ -324,67 +320,12 @@ class ImageMetadataTests(unittest.TestCase):
                 self.assertEqual(MODULE.main(), 0)
 
             self.assertEqual(call_api.call_count, 3)
-            submitted_prompts = [call.args[3] for call in call_api.call_args_list]
-            self.assertEqual(len(set(submitted_prompts)), 3)
-            self.assertTrue(all("Keep the same hero" in prompt for prompt in submitted_prompts))
-            self.assertIn("Page 1 only", submitted_prompts[0])
-            self.assertNotIn("Page 2 only", submitted_prompts[0])
-            self.assertIn("Page 2 only", submitted_prompts[1])
-            self.assertNotIn("Page 1 only", submitted_prompts[1])
-            self.assertIn("Page 3 only", submitted_prompts[2])
+            self.assertTrue(all(call.args[3] == call_api.call_args_list[0].args[3] for call in call_api.call_args_list))
+            self.assertTrue(all(call.args[5] == 1 for call in call_api.call_args_list))
             events = [json.loads(line) for line in stdout.getvalue().splitlines()]
             self.assertEqual([event["image_index"] for event in events[:-1]], [1, 2, 3])
-            self.assertEqual(events[-1]["prompt_mode"], "per-output")
             self.assertEqual(events[-1]["requested_count"], 3)
-
-    def test_ordered_story_stops_after_failed_output_without_submitting_the_next(self):
-        with TemporaryDirectory() as output_dir:
-            output_path = Path(output_dir)
-            first_image = output_path / "page-1.png"
-            first_image.write_bytes(b"validated image")
-            stdout = io.StringIO()
-            argv = [
-                "generate.py",
-                "--request-id",
-                "ordered-story-partial",
-                "--output-prompt",
-                "Page 1 only",
-                "--output-prompt",
-                "Page 2 only",
-                "--output-prompt",
-                "Page 3 only",
-                "--out-dir",
-                str(output_path),
-            ]
-            with (
-                mock.patch.object(sys, "argv", argv),
-                mock.patch.object(
-                    MODULE,
-                    "discover_credentials",
-                    return_value=("https://eos.manyuvip.com", "test-key", "gpt-image-2", "test"),
-                ),
-                mock.patch.object(
-                    MODULE,
-                    "call_api",
-                    side_effect=[{"data": [{}]}, MODULE.ImageGenError("page 2 rejected")],
-                ) as call_api,
-                mock.patch.object(
-                    MODULE,
-                    "save_images",
-                    return_value=(
-                        [str(first_image)],
-                        [{"width": 1024, "height": 1536, "format": "PNG", "resolution": "1K"}],
-                    ),
-                ),
-                mock.patch.object(sys, "stdout", stdout),
-            ):
-                self.assertEqual(MODULE.main(), 0)
-
-            self.assertEqual(call_api.call_count, 2)
-            final = json.loads(stdout.getvalue().splitlines()[-1])
-            self.assertTrue(final["partial"])
-            self.assertEqual(final["failed_output"], 2)
-            self.assertEqual(final["count"], 1)
+            self.assertEqual(events[-1]["count"], 3)
 
     def test_later_output_failure_keeps_earlier_saved_image_without_retry(self):
         with TemporaryDirectory() as output_dir:
