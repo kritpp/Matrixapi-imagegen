@@ -26,10 +26,10 @@ class DistributionTests(unittest.TestCase):
     def test_domain_name_and_version_are_adapted(self) -> None:
         generate = (SKILL / "scripts" / "generate.py").read_text(encoding="utf-8")
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn('SKILL_VERSION = "1.8.8"', generate)
+        self.assertIn('SKILL_VERSION = "1.8.9"', generate)
         self.assertIn('DEFAULT_MODEL = "gpt-image-2"', generate)
-        self.assertIn('DEFAULT_BASE_URL = "https://eos.manyuvip.com"', generate)
-        self.assertIn('ALLOWED_BASE_HOST = "eos.manyuvip.com"', generate)
+        self.assertIn('DEFAULT_BASE_URL = "https://matrixapii.com"', generate)
+        self.assertIn('ALLOWED_BASE_HOST = "matrixapii.com"', generate)
         self.assertIn('base_url, key = DEFAULT_BASE_URL, imagegen_key', generate)
         self.assertIn("name: Matrixapi-imagegen", skill)
         self.assertNotIn("auv.666svip.top", generate + skill)

@@ -41,8 +41,8 @@ REQUIRED_FILES = (
     "scripts/update_skill.py",
     "agents/openai.yaml",
 )
-FIXED_BASE_URL = "https://eos.manyuvip.com"
-FIXED_BASE_HOST = "eos.manyuvip.com"
+FIXED_BASE_URL = "https://matrixapii.com"
+FIXED_BASE_HOST = "matrixapii.com"
 SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
 
 

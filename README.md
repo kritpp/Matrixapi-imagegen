@@ -1,14 +1,14 @@
 # Matrixapi Image Generation Skill
 
-This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `eos.manyuvip.com` relay. It is adapted from the original author's v1.4.3 source.
+This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.8**
+Current release: **v1.8.9**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.8](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.8.zip)
+[下载 Matrixapi-imagegen v1.8.9](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.9.zip)
 
 解压后按系统运行安装程序：
 
@@ -16,7 +16,7 @@ Current release: **v1.8.8**
 - macOS：双击 `install-macos.command`，或运行 `install-macos.sh`
 
 安装程序只要求输入 MatrixAI API Key，并默认使用 `gpt-image-2`。API URL
-`https://eos.manyuvip.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
+`https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
 安装位置：
@@ -63,7 +63,7 @@ export IMAGEGEN_MODEL="gpt-image-2"
 ```
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
-`https://eos.manyuvip.com`。需要 Pro 时，只把 `IMAGEGEN_MODEL` 改为
+`https://matrixapii.com`。需要 Pro 时，只把 `IMAGEGEN_MODEL` 改为
 `gpt-image-2-pro`。
 
 macOS 一键安装器会将 Key 和模型保存到权限为仅当前用户可读的

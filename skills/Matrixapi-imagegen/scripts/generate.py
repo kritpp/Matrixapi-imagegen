@@ -29,9 +29,9 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 
 DEFAULT_MODEL = "gpt-image-2"
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.8"
-DEFAULT_BASE_URL = "https://eos.manyuvip.com"
-ALLOWED_BASE_HOST = "eos.manyuvip.com"
+SKILL_VERSION = "1.8.9"
+DEFAULT_BASE_URL = "https://matrixapii.com"
+ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024

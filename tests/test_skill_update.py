@@ -53,9 +53,9 @@ class SkillUpdateTests(unittest.TestCase):
     def test_archive_version_is_read_from_the_package_filename(self):
         self.assertEqual(
             MODULE._archive_version(
-                "https://github.com/kritpp/Matrixapi-imagegen/raw/main/Matrixapi-imagegen-v1.8.8.zip"
+                "https://github.com/kritpp/Matrixapi-imagegen/raw/main/Matrixapi-imagegen-v1.8.9.zip"
             ),
-            "1.8.8",
+            "1.8.9",
         )
         with self.assertRaises(MODULE.UpdateError):
             MODULE._archive_version("https://example.invalid/latest.zip")
@@ -71,14 +71,14 @@ class SkillUpdateTests(unittest.TestCase):
                 "---\nname: Matrixapi-imagegen\n---\n", encoding="utf-8"
             )
             (staged / "scripts" / "generate.py").write_text(
-                'SKILL_VERSION = "1.8.8"\n'
-                'DEFAULT_BASE_URL = "https://eos.manyuvip.com"\n'
-                'ALLOWED_BASE_HOST = "eos.manyuvip.com"\n',
+                'SKILL_VERSION = "1.8.9"\n'
+                'DEFAULT_BASE_URL = "https://matrixapii.com"\n'
+                'ALLOWED_BASE_HOST = "matrixapii.com"\n',
                 encoding="utf-8",
             )
-            MODULE._validate_staged_skill(staged, "1.8.8")
+            MODULE._validate_staged_skill(staged, "1.8.9")
             with self.assertRaises(MODULE.UpdateError):
-                MODULE._validate_staged_skill(staged, "1.8.9")
+                MODULE._validate_staged_skill(staged, "1.8.10")
 
     def test_replacement_removes_stale_files_from_previous_version(self):
         with TemporaryDirectory() as root:
@@ -127,19 +127,19 @@ class SkillUpdateTests(unittest.TestCase):
             script = target / "scripts" / "generate.py"
             script.write_text(
                 "import json\n"
-                "print(json.dumps({'ok': True, 'version': '1.8.8', "
+                "print(json.dumps({'ok': True, 'version': '1.8.9', "
                 "'model': 'gpt-image-2-pro', 'supported_models': "
                 "['gpt-image-2', 'gpt-image-2-pro']}))\n",
                 encoding="utf-8",
             )
 
             payload = MODULE._installed_check(target)
-            self.assertEqual(payload["skill_version"], "1.8.8")
+            self.assertEqual(payload["skill_version"], "1.8.9")
             self.assertEqual(payload["model"], "gpt-image-2-pro")
             self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
 
     def test_local_release_updates_atomically_without_touching_external_data(self):
-        package = Path(__file__).parents[1] / "Matrixapi-imagegen-v1.8.8.zip"
+        package = Path(__file__).parents[1] / "Matrixapi-imagegen-v1.8.9.zip"
         with TemporaryDirectory() as root:
             root_path = Path(root)
             target = root_path / "skills" / "Matrixapi-imagegen"
@@ -158,7 +158,7 @@ class SkillUpdateTests(unittest.TestCase):
             ):
                 installed = MODULE.update_skill(package.resolve().as_uri(), target)
 
-            self.assertEqual(installed["skill_version"], "1.8.8")
+            self.assertEqual(installed["skill_version"], "1.8.9")
             self.assertFalse((target / "old-only.txt").exists())
             self.assertTrue((target / "scripts" / "update_skill.py").is_file())
             self.assertEqual(external_config.read_text(encoding="utf-8"), "IMAGEGEN_API_KEY=unchanged")

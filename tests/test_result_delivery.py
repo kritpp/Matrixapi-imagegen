@@ -47,7 +47,7 @@ class ResultDeliveryTests(unittest.TestCase):
             patch.object(generate, "_user_environment_value", return_value=""),
         ):
             base_url, key, model, source = generate.discover_credentials()
-        self.assertEqual(base_url, "https://eos.manyuvip.com")
+        self.assertEqual(base_url, "https://matrixapii.com")
         self.assertEqual(key, "test-key")
         self.assertEqual(model, "gpt-image-2")
         self.assertEqual(source, "environment")
@@ -68,7 +68,7 @@ class ResultDeliveryTests(unittest.TestCase):
             patch.object(generate, "_user_environment_value", return_value=""),
         ):
             base_url, key, model, source = generate.discover_credentials()
-        self.assertEqual(base_url, "https://eos.manyuvip.com")
+        self.assertEqual(base_url, "https://matrixapii.com")
         self.assertEqual(key, "file-key")
         self.assertEqual(model, "gpt-image-2-pro")
         self.assertEqual(source, "environment")
@@ -211,7 +211,7 @@ class SkillRoutingContractTests(unittest.TestCase):
                 patch.object(
                     generate,
                     "discover_credentials",
-                    return_value=("https://eos.manyuvip.com", "key", "gpt-image-2", "test"),
+                    return_value=("https://matrixapii.com", "key", "gpt-image-2", "test"),
                 ),
                 patch.object(generate, "call_api", return_value={"data": [{"url": "https://example/image"}]}) as call_generate,
                 patch.object(generate, "call_edit_api") as call_edit,
@@ -247,7 +247,7 @@ class SkillRoutingContractTests(unittest.TestCase):
                 patch.object(
                     generate,
                     "discover_credentials",
-                    return_value=("https://eos.manyuvip.com", "key", "gpt-image-2", "test"),
+                    return_value=("https://matrixapii.com", "key", "gpt-image-2", "test"),
                 ),
                 patch.object(generate, "call_api") as call_generate,
                 patch.object(generate, "call_edit_api", return_value={"data": [{"url": "https://example/image"}]}) as call_edit,

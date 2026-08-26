@@ -96,7 +96,7 @@ python <skill-directory>/scripts/generate.py --process-only \
 ## Configuration
 
 This distribution is intentionally pinned to the user's image relay at
-`https://eos.manyuvip.com/`. Other image API hosts are rejected by the script.
+`https://matrixapii.com/`. Other image API hosts are rejected by the script.
 
 The script discovers credentials in this order:
 
