@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.9**
+Current release: **v1.8.10**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.9](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.9.zip)
+[下载 Matrixapi-imagegen v1.8.10](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.10.zip)
 
 解压后按系统运行安装程序：
 
@@ -101,6 +101,28 @@ full resolution. Large local edits (6 or more references, or at least 48 MiB
 of source files) use the relay's asynchronous task endpoint automatically and
 poll for the result, so a long synchronous connection cannot be lost after the
 upstream has completed. It never retries a billed task automatically.
+
+## Fast sequential comics
+
+For a connected multi-page comic, `--story-pages` starts generation immediately
+without requiring Codex to pre-write every page prompt. Page 1 uses the complete
+original reference set. Each successful page returns an exact `next_arguments`
+array; continuing with those arguments makes page 2 use only page 1, page 3 use
+only page 2, and so on. The shared story request, style, characters, requested
+size, quality, and ratio are persisted in a task-scoped state file.
+
+Each command generates and returns one page, allowing Codex to display it before
+starting the next page. Story pages always use `n=1`, default to vertical `2:3`
+when no ratio is specified, and use async delivery. A failed page permanently
+stops automatic continuation, so a completed or billed page is not submitted
+again automatically.
+
+```text
+python skills/Matrixapi-imagegen/scripts/generate.py --task-id task-story-0001 \
+  --story-pages 3 --prompt "<complete story request>" \
+  --image /path/to/reference-1.png --image /path/to/reference-2.png \
+  --size 4K --quality high
+```
 
 When editing a local image without an explicit `--aspect-ratio`, the Skill reads
 the first input image dimensions and chooses the closest supported model ratio

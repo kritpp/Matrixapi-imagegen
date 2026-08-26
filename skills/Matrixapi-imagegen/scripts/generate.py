@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 
 DEFAULT_MODEL = "gpt-image-2"
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.9"
+SKILL_VERSION = "1.8.10"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -50,6 +50,8 @@ AUTO_ASYNC_REFERENCE_COUNT = 6
 AUTO_ASYNC_REFERENCE_BYTES = 48 * 1024 * 1024
 PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
+STORY_STATE_VERSION = 1
+MAX_STORY_PAGES = 20
 # The pinned GPT Image 2 routes accept native 4K edits. Older relays can still
 # opt into the legacy downscale through IMAGEGEN_LEGACY_EDIT_RESIZE.
 EDIT_MAX_EDGE = 1792
@@ -1041,6 +1043,236 @@ def ensure_new_task(output_dir: Path, task_id: str) -> None:
         )
 
 
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temp_path.replace(path)
+    except OSError as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ImageGenError(f"Unable to save story state: {exc}") from exc
+
+
+def _story_id(task_id: str) -> str:
+    return f"story-{uuid.uuid5(uuid.NAMESPACE_URL, task_id).hex}"
+
+
+def story_state_path(output_dir: Path, story_id: str) -> Path:
+    return output_dir.expanduser().resolve() / ".stories" / f"{story_id}.json"
+
+
+def _load_story_state(path: Path) -> dict[str, Any]:
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            raise ImageGenError("Story state file is too large")
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ImageGenError(f"Story state file does not exist: {path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ImageGenError(f"Unable to read story state: {exc}") from exc
+    if not isinstance(state, dict) or state.get("state_version") != STORY_STATE_VERSION:
+        raise ImageGenError("Story state file is invalid or incompatible")
+    return state
+
+
+def build_story_page_prompt(root_prompt: str, page: int, total_pages: int) -> str:
+    if page == 1:
+        phase = (
+            "Establish the setting and both main characters, then begin the conflict "
+            "with a clear first exchange that leaves forward momentum."
+        )
+        reference_rule = (
+            "Use all supplied reference images together to derive one coherent visual style."
+        )
+    elif page == total_pages:
+        phase = (
+            "Continue directly from the previous page into the visual climax and a clear "
+            "resolution; do not restart the encounter or introduce unrelated characters."
+        )
+        reference_rule = "Use the supplied previous page as the exact continuity reference."
+    else:
+        phase = (
+            "Continue directly from the previous page, escalate the action, and advance the "
+            "story toward the climax without restarting the encounter."
+        )
+        reference_rule = "Use the supplied previous page as the exact continuity reference."
+    return (
+        f"Create comic page {page} of {total_pages}. {reference_rule} {phase} "
+        "Choose an effective number of panels and camera angles for this page. Preserve character "
+        "designs, costumes, colors, environment, lighting, drawing style, and action continuity. "
+        "No captions, speech bubbles, lettering, logos, or watermarks. "
+        f"Full story request: {root_prompt.strip()}"
+    )
+
+
+def _claim_story_continuation(path: Path, task_id: str) -> dict[str, Any]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise ImageGenError("This story page is already being generated") from exc
+    try:
+        os.close(descriptor)
+        state = _load_story_state(path)
+        if state.get("status") != "active":
+            raise ImageGenError(
+                f"Story cannot continue because its status is {state.get('status', 'unknown')}"
+            )
+        if state.get("next_task_id") != task_id:
+            raise ImageGenError("--task-id does not match this story's next page")
+        next_page = int(state.get("page", 0)) + 1
+        if next_page > int(state.get("total_pages", 0)):
+            raise ImageGenError("This story is already complete")
+        state.update(
+            {
+                "status": "in_progress",
+                "pending_page": next_page,
+                "current_task_id": task_id,
+                "next_task_id": None,
+                "updated_at_ms": time.time_ns() // 1_000_000,
+            }
+        )
+        _atomic_write_json(path, state)
+        return state
+    finally:
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _start_story(
+    path: Path,
+    task_id: str,
+    total_pages: int,
+    root_prompt: str,
+    output_dir: Path,
+    model: str,
+    size: str,
+    quality: str,
+    aspect_ratio: str,
+) -> dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    try:
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise ImageGenError("This story task is already starting") from exc
+    try:
+        os.close(descriptor)
+        if path.exists():
+            raise ImageGenError(
+                "This story task already exists; do not submit its first page again"
+            )
+        now_ms = time.time_ns() // 1_000_000
+        state = {
+            "state_version": STORY_STATE_VERSION,
+            "story_id": path.stem,
+            "status": "in_progress",
+            "page": 0,
+            "pending_page": 1,
+            "total_pages": total_pages,
+            "root_prompt": root_prompt,
+            "output_dir": output_dir.resolve().as_posix(),
+            "model": model,
+            "size": size,
+            "quality": quality,
+            "aspect_ratio": aspect_ratio,
+            "last_original_file": None,
+            "current_task_id": task_id,
+            "next_task_id": None,
+            "created_at_ms": now_ms,
+            "updated_at_ms": now_ms,
+        }
+        _atomic_write_json(path, state)
+        _schedule_result_hide(path)
+        return state
+    finally:
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _complete_story_page(
+    path: Path, task_id: str, original_file: str
+) -> dict[str, Any]:
+    state = _load_story_state(path)
+    if state.get("status") != "in_progress" or state.get("current_task_id") != task_id:
+        raise ImageGenError("Story state no longer matches the completed page")
+    page = int(state["pending_page"])
+    total_pages = int(state["total_pages"])
+    state.update(
+        {
+            "page": page,
+            "pending_page": None,
+            "last_original_file": Path(original_file).resolve().as_posix(),
+            "current_task_id": None,
+            "updated_at_ms": time.time_ns() // 1_000_000,
+        }
+    )
+    if page >= total_pages:
+        state["status"] = "completed"
+        state["next_task_id"] = None
+    else:
+        state["status"] = "active"
+        state["next_task_id"] = normalize_task_id()
+    _atomic_write_json(path, state)
+    _schedule_result_hide(path)
+    return state
+
+
+def _fail_story_page(path: Path | None, task_id: str | None, error: str) -> None:
+    if path is None or task_id is None or not path.is_file():
+        return
+    try:
+        state = _load_story_state(path)
+        if state.get("status") != "in_progress" or state.get("current_task_id") != task_id:
+            return
+        state.update(
+            {
+                "status": "failed",
+                "pending_page": None,
+                "next_task_id": None,
+                "error": error[:1000],
+                "updated_at_ms": time.time_ns() // 1_000_000,
+            }
+        )
+        _atomic_write_json(path, state)
+        _schedule_result_hide(path)
+    except ImageGenError:
+        pass
+
+
+def story_result_payload(path: Path, state: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "story_id": state["story_id"],
+        "state_file": path.resolve().as_posix(),
+        "page": state["page"],
+        "total_pages": state["total_pages"],
+        "status": state["status"],
+    }
+    if state.get("status") == "active":
+        payload.update(
+            {
+                "next_task_id": state["next_task_id"],
+                "next_arguments": [
+                    "--story-next",
+                    path.resolve().as_posix(),
+                    "--task-id",
+                    state["next_task_id"],
+                ],
+            }
+        )
+    return payload
+
+
 def _utc_millis_text(timestamp_ms: int) -> str:
     seconds, millis = divmod(timestamp_ms, 1000)
     return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(seconds))}.{millis:03d}Z"
@@ -1177,6 +1409,16 @@ def parse_args() -> argparse.Namespace:
         help="Unique id for matching this command's result without scanning output directories",
     )
     parser.add_argument(
+        "--story-pages",
+        type=int,
+        help="Start a sequential comic story with this many pages; each command returns one page",
+    )
+    parser.add_argument(
+        "--story-next",
+        type=Path,
+        help="Continue the exact story state returned by the preceding successful page",
+    )
+    parser.add_argument(
         "--output-size",
         help="本地最终输出尺寸 WIDTHxHEIGHT；生成完成后精确缩放/裁剪，不发送给模型",
     )
@@ -1249,6 +1491,11 @@ def main() -> int:
     args = parse_args()
     request_started_at_ms = time.time_ns() // 1_000_000
     task_id: str | None = None
+    story_path: Path | None = None
+    story_state: dict[str, Any] | None = None
+    story_begun = False
+    story_root_prompt: str | None = None
+    story_page: int | None = None
     try:
         if args.n < 1 or args.n > 4:
             raise ImageGenError("Image count must be between 1 and 4")
@@ -1256,6 +1503,50 @@ def main() -> int:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
         if args.output_quality is not None and not 1 <= args.output_quality <= 100:
             raise ImageGenError("--output-quality must be between 1 and 100")
+        if args.story_pages is not None and args.story_next is not None:
+            raise ImageGenError("Use --story-pages or --story-next, not both")
+        if args.story_pages is not None:
+            if args.story_pages < 2 or args.story_pages > MAX_STORY_PAGES:
+                raise ImageGenError(
+                    f"--story-pages must be between 2 and {MAX_STORY_PAGES}"
+                )
+            if args.n != 1:
+                raise ImageGenError("Sequential stories generate exactly one page per command")
+            if args.process_only:
+                raise ImageGenError("--story-pages cannot be combined with --process-only")
+            if args.aspect_ratio == "auto":
+                args.aspect_ratio = "2:3"
+            args.async_mode = True
+            story_root_prompt = (args.prompt or "").strip()
+            story_page = 1
+        elif args.story_next is not None:
+            if args.process_only:
+                raise ImageGenError("--story-next cannot be combined with --process-only")
+            story_path = args.story_next.expanduser().resolve()
+            story_state = _load_story_state(story_path)
+            if story_state.get("status") != "active":
+                raise ImageGenError(
+                    f"Story cannot continue because its status is {story_state.get('status', 'unknown')}"
+                )
+            story_root_prompt = str(story_state.get("root_prompt") or "").strip()
+            story_page = int(story_state.get("page", 0)) + 1
+            total_pages = int(story_state.get("total_pages", 0))
+            args.prompt = build_story_page_prompt(
+                story_root_prompt, story_page, total_pages
+            )
+            args.model = str(story_state.get("model") or "").strip()
+            args.size = str(story_state.get("size") or "").strip()
+            args.quality = str(story_state.get("quality") or "").strip()
+            args.aspect_ratio = str(story_state.get("aspect_ratio") or "").strip()
+            args.images = [str(story_state.get("last_original_file") or "").strip()]
+            args.reference_urls = []
+            args.mask = None
+            args.mode = "auto"
+            args.n = 1
+            args.stream = False
+            args.async_mode = True
+            args.webhook = None
+            args.metadata = None
         requested_size = normalize_size(args.size or "1K")
 
         image_paths = list(args.images or [])
@@ -1338,6 +1629,7 @@ def main() -> int:
                             "url-reference-edit",
                             "async",
                             "stream",
+                            "sequential-story",
                             "local-process",
                         ],
                     },
@@ -1347,12 +1639,26 @@ def main() -> int:
             return 0
 
         task_id = normalize_task_id(args.task_id)
-        output_dir = args.out_dir or (
-            Path.home() / ".codex" / "generated_images" / SKILL_NAME
-        )
+        if story_state is not None:
+            state_output_dir = str(story_state.get("output_dir") or "").strip()
+            if not state_output_dir:
+                raise ImageGenError("Story state does not contain an output directory")
+            output_dir = Path(state_output_dir)
+            model = str(story_state.get("model") or model).strip()
+        else:
+            output_dir = args.out_dir or (
+                Path.home() / ".codex" / "generated_images" / SKILL_NAME
+            )
         ensure_new_task(output_dir, task_id)
 
-        raw_prompt = (args.prompt or "").strip()
+        if args.story_pages is not None:
+            if not story_root_prompt:
+                raise ImageGenError("Prompt must not be empty")
+            raw_prompt = build_story_page_prompt(
+                story_root_prompt, 1, args.story_pages
+            )
+        else:
+            raw_prompt = (args.prompt or "").strip()
         if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
         original_prompt_chars = len(raw_prompt)
@@ -1451,6 +1757,26 @@ def main() -> int:
                 "the automatic async path does not attach metadata to multipart requests"
             )
 
+        if args.story_next is not None:
+            if story_path is None:
+                raise ImageGenError("Story state path is missing")
+            story_state = _claim_story_continuation(story_path, task_id)
+            story_begun = True
+        elif args.story_pages is not None:
+            story_path = story_state_path(output_dir, _story_id(task_id))
+            story_state = _start_story(
+                story_path,
+                task_id,
+                args.story_pages,
+                story_root_prompt or "",
+                output_dir,
+                model,
+                requested_size,
+                quality,
+                aspect_ratio,
+            )
+            story_begun = True
+
         options = _option_fields(quality, args.background, args.input_fidelity)
         if image_paths:
             # The pinned relay can convert GPT Image 2 multipart edits to its
@@ -1530,6 +1856,7 @@ def main() -> int:
                     background_color=args.output_background,
                 )
             except PostprocessError as exc:
+                _fail_story_page(story_path, task_id, str(exc))
                 print(
                     json.dumps(
                         {
@@ -1550,48 +1877,58 @@ def main() -> int:
             postprocess_manifest = str(Path(processed_dir).resolve() / "postprocess-manifest.json")
         preview_files = preview_paths(processed_files)
         download_files = preview_files.copy()
+        story_payload = None
+        if story_begun:
+            if story_path is None or not original_files:
+                raise ImageGenError("Story page completed without a usable original image")
+            story_state = _complete_story_page(story_path, task_id, original_files[0])
+            story_payload = story_result_payload(story_path, story_state)
+        success_payload = {
+            "ok": True,
+            "skill_name": SKILL_NAME,
+            "version": SKILL_VERSION,
+            "mode": mode,
+            "model": model,
+            "count": len(files),
+            "prompt_limit": PROMPT_MAX_CHARS,
+            "prompt_compacted": prompt_compacted,
+            "prompt_original_chars": original_prompt_chars,
+            "prompt_chars": len(prompt),
+            "size": size,
+            "requested_size": requested_size,
+            "edit_size": size if mode == "edit" else None,
+            "resized_for_edit": mode == "edit" and size != edit_input_size,
+            "quality": quality,
+            "aspect_ratio": aspect_ratio,
+            "aspect_ratio_source": aspect_ratio_source,
+            "async": async_mode,
+            "async_requested": requested_async,
+            "async_auto": auto_async,
+            "async_reason": async_reason,
+            "async_fallback": async_fallback,
+            "stream": args.stream,
+            "input_images": len(image_paths) + len(reference_urls),
+            "input_bytes": input_bytes,
+            "mask": bool(args.mask),
+            "files": files,
+            "original_files": original_files,
+            "processed_files": processed_files,
+            "postprocess": postprocess_requested,
+            "postprocess_manifest": postprocess_manifest,
+            "preview_files": preview_files,
+            "download_files": download_files,
+        }
+        if story_payload is not None:
+            success_payload["story"] = story_payload
         emit_success(
-            {
-                "ok": True,
-                "skill_name": SKILL_NAME,
-                "version": SKILL_VERSION,
-                "mode": mode,
-                "model": model,
-                "count": len(files),
-                "prompt_limit": PROMPT_MAX_CHARS,
-                "prompt_compacted": prompt_compacted,
-                "prompt_original_chars": original_prompt_chars,
-                "prompt_chars": len(prompt),
-                "size": size,
-                "requested_size": requested_size,
-                "edit_size": size if mode == "edit" else None,
-                "resized_for_edit": mode == "edit" and size != edit_input_size,
-                "quality": quality,
-                "aspect_ratio": aspect_ratio,
-                "aspect_ratio_source": aspect_ratio_source,
-                "async": async_mode,
-                "async_requested": requested_async,
-                "async_auto": auto_async,
-                "async_reason": async_reason,
-                "async_fallback": async_fallback,
-                "stream": args.stream,
-                "input_images": len(image_paths) + len(reference_urls),
-                "input_bytes": input_bytes,
-                "mask": bool(args.mask),
-                "files": files,
-                "original_files": original_files,
-                "processed_files": processed_files,
-                "postprocess": postprocess_requested,
-                "postprocess_manifest": postprocess_manifest,
-                "preview_files": preview_files,
-                "download_files": download_files,
-            },
+            success_payload,
             output_dir,
             task_id,
             request_started_at_ms,
         )
         return 0
     except ImageGenError as exc:
+        _fail_story_page(story_path, task_id, str(exc))
         print(
             json.dumps(
                 {
