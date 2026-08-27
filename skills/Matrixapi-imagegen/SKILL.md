@@ -126,6 +126,15 @@ The check reports only whether a supported configuration was found, its generic 
 
 ## Updating
 
+### Duplicate-charge protection
+
+Each API request is keyed by a deterministic fingerprint containing the current
+Codex thread, prompt, model, mode, size, quality, count, and the ordered
+reference-image content. A completed identical request is returned from its
+local result record without another API call. If a prior request was submitted
+but its final state is unknown, the identical request is blocked to prevent a
+second charge. Only an explicit `--force-new` retry can override that guard.
+
 When the user explicitly asks to update Matrixapi-imagegen, run exactly once:
 
 ```text
