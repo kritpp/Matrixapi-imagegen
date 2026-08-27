@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import re
-import statistics
 from pathlib import Path
 from typing import Any
 
@@ -68,15 +67,6 @@ def parse_crop(value: str) -> tuple[int, int, int, int]:
     if x < 0 or y < 0:
         raise PostprocessError("裁剪坐标不能为负数")
     return x, y, width, height
-
-
-def parse_text_box(value: str) -> tuple[int, int, int, int]:
-    try:
-        return parse_crop(value)
-    except PostprocessError as exc:
-        raise PostprocessError(
-            "文字区域必须使用 x,y,width,height，例如 120,80,600,160"
-        ) from exc
 
 
 def parse_color(value: str | None) -> tuple[int, int, int, int] | None:
@@ -273,106 +263,3 @@ def process_many(paths: list[str], output_dir: str | Path, **kwargs: Any) -> lis
         encoding="utf-8",
     )
     return results
-
-
-def _text_font(font_path: str | None, size: int):
-    try:
-        from PIL import ImageFont
-    except ImportError as exc:  # pragma: no cover
-        raise PostprocessError("本地精准文字处理需要 Pillow") from exc
-    candidates = [
-        Path(font_path).expanduser() if font_path else None,
-        Path("C:/Windows/Fonts/msyh.ttc"),
-        Path("C:/Windows/Fonts/simhei.ttf"),
-        Path("/System/Library/Fonts/PingFang.ttc"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-    ]
-    for candidate in candidates:
-        if candidate and candidate.is_file():
-            try:
-                return ImageFont.truetype(str(candidate), size=size)
-            except OSError:
-                continue
-    raise PostprocessError("找不到可用字体；请用 --font-path 指定支持目标文字的字体文件")
-
-
-def precise_text_edit(
-    source_path: str | Path,
-    output_dir: str | Path,
-    *,
-    text: str,
-    text_box: str,
-    font_path: str | None = None,
-    font_size: int | None = None,
-    text_color: str | None = None,
-    background_color: str | None = None,
-) -> dict[str, Any]:
-    """Replace a known text region deterministically without an image API call."""
-    try:
-        from PIL import Image, ImageDraw, ImageOps
-    except ImportError as exc:  # pragma: no cover
-        raise PostprocessError("本地精准文字处理需要 Pillow") from exc
-    if not text:
-        raise PostprocessError("--new-text 不能为空")
-    source = Path(source_path).expanduser().resolve()
-    if not source.is_file():
-        raise PostprocessError(f"本地输入图片不存在: {source}")
-    x, y, width, height = parse_text_box(text_box)
-    with Image.open(source) as opened:
-        image = ImageOps.exif_transpose(opened).convert("RGBA")
-        if x + width > image.width or y + height > image.height:
-            raise PostprocessError("文字区域超出源图片范围")
-
-        explicit_background = parse_color(background_color)
-        if explicit_background is None:
-            border: list[tuple[int, int, int, int]] = []
-            left, top, right, bottom = x, y, x + width, y + height
-            for px in range(left, right):
-                border.append(image.getpixel((px, top)))
-                border.append(image.getpixel((px, bottom - 1)))
-            for py in range(top, bottom):
-                border.append(image.getpixel((left, py)))
-                border.append(image.getpixel((right - 1, py)))
-            fill = tuple(int(statistics.median(pixel[channel] for pixel in border)) for channel in range(4))
-        else:
-            fill = explicit_background
-
-        explicit_text = parse_color(text_color)
-        if explicit_text is None:
-            luminance = 0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2]
-            ink = (20, 20, 20, 255) if luminance >= 150 else (245, 245, 245, 255)
-        else:
-            ink = explicit_text
-
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((x, y, x + width - 1, y + height - 1), fill=fill)
-        chosen_size = font_size or max(12, int(height * 0.68))
-        while chosen_size >= 8:
-            font = _text_font(font_path, chosen_size)
-            box = draw.textbbox((0, 0), text, font=font)
-            text_width, text_height = box[2] - box[0], box[3] - box[1]
-            if text_width <= width * 0.94 and text_height <= height * 0.9:
-                break
-            chosen_size -= 1
-        else:
-            raise PostprocessError("目标文字无法放入指定区域；请扩大 --text-box")
-        tx = x + (width - text_width) / 2 - box[0]
-        ty = y + (height - text_height) / 2 - box[1]
-        draw.text((tx, ty), text, font=font, fill=ink)
-
-        destination = Path(output_dir).expanduser().resolve()
-        destination.mkdir(parents=True, exist_ok=True)
-        output = destination / f"{source.stem}_precise-text.png"
-        image.save(output, format="PNG", optimize=True)
-
-    return {
-        "source": str(source),
-        "output": str(output),
-        "text": text,
-        "text_box": [x, y, width, height],
-        "font_size": chosen_size,
-        "text_color": list(ink),
-        "background_color": list(fill),
-        "api_called": False,
-    }

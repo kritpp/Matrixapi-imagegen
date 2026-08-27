@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.12**
+Current release: **v1.8.10**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.12](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.12.zip)
+[下载 Matrixapi-imagegen v1.8.10](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.10.zip)
 
 解压后按系统运行安装程序：
 
@@ -100,10 +100,7 @@ The Skill accepts up to 16 references. Native GPT Image 2 4K edits are kept at
 full resolution. Large local edits (6 or more references, or at least 48 MiB
 of source files) use the relay's asynchronous task endpoint automatically and
 poll for the result, so a long synchronous connection cannot be lost after the
-upstream has completed. An initial submission is retried at most twice (three
-total attempts) only for HTTP 502/503/504 or an explicit pre-connection failure,
-always with the same idempotency key. It never resubmits after a task ID, image,
-timeout with unknown billing state, ordinary 400, content refusal, or local error.
+upstream has completed. It never retries a billed task automatically.
 
 ## Fast sequential comics
 
@@ -156,25 +153,6 @@ runs a local image-understanding model. Semantic editing, inpainting,
 background removal, restoration, and other model-backed work remain upstream.
 Install Pillow with `python -m pip install pillow` only if local processing is
 requested and the active Python environment does not already provide it.
-
-## Text editing
-
-The existing generation and image-edit routes remain unchanged. Two optional
-text-specific modes are available:
-
-- `--replace-text "旧文字" --new-text "新文字"` performs an ordinary model edit
-  using the exact preceding image. The prompt locks composition, subjects,
-  background, and all unrelated text while requiring the replacement text
-  character for character. GPT Image Pro receives the same rule without another
-  planning or model call.
-- `--precise-text --new-text "新文字" --text-box x,y,width,height` edits the known
-  text region locally with Pillow. It preserves the original, saves a separate
-  PNG, and does not call or charge the image API. Optional font, font size, text
-  color, and background color arguments are supported.
-
-Complex artistic lettering in a flattened image may require a clean background
-or source file for lossless restoration; the local mode does not download OCR or
-image-understanding models.
 
 ## Clearer upstream errors
 
