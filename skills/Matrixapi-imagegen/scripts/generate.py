@@ -6,11 +6,14 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
+import hashlib
 import json
 import mimetypes
 import os
 from pathlib import Path
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -22,17 +25,23 @@ import urllib.request
 import uuid
 
 try:
-    from postprocess import PostprocessError, parse_output_size, process_many
+    from postprocess import PostprocessError, parse_output_size, precise_text_edit, process_many
 except ImportError:  # pragma: no cover - allows importing this file as a module
-    from .postprocess import PostprocessError, parse_output_size, process_many
+    from .postprocess import PostprocessError, parse_output_size, precise_text_edit, process_many
 
 
 DEFAULT_MODEL = "gpt-image-2"
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.10"
+SKILL_VERSION = "1.8.12"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
+IDEMPOTENCY_VERSION = 1
+IDEMPOTENCY_TTL_MS = 15 * 60 * 1000
+IDEMPOTENCY_WAIT_INTERVAL_SECONDS = 0.2
+MAX_SAFE_SUBMIT_ATTEMPTS = 3
+SAFE_RETRY_STATUS_CODES = {502, 503, 504}
+SAFE_RETRY_BACKOFF_SECONDS = (0.5, 1.0)
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 # Keep multipart uploads below the relay's 256 MiB request limit. The margin
@@ -63,6 +72,21 @@ MASK_SUPPORT_ENV = "IMAGEGEN_MASK_SUPPORT"
 
 class ImageGenError(RuntimeError):
     pass
+
+
+class UpstreamSubmitError(ImageGenError):
+    """A failed initial submission with an explicit retry-safety verdict."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        safe_to_retry: bool = False,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.safe_to_retry = safe_to_retry
+        self.status_code = status_code
 
 
 CONTENT_POLICY_MARKERS = (
@@ -151,6 +175,31 @@ def compact_prompt(prompt: str, limit: int = PROMPT_MAX_CHARS) -> tuple[str, boo
     if len(compacted) > limit:
         compacted = compacted[:limit].rstrip()
     return compacted, True
+
+
+def build_exact_text_edit_prompt(
+    user_prompt: str,
+    old_text: str,
+    new_text: str,
+    model: str,
+) -> str:
+    """Add deterministic wording constraints only for an explicit text-edit request."""
+    old_literal = json.dumps(old_text, ensure_ascii=False)
+    new_literal = json.dumps(new_text, ensure_ascii=False)
+    model_note = (
+        "This is a GPT Image Pro precision text-edit request. "
+        if model == "gpt-image-2-pro"
+        else "This is a precision text-edit request. "
+    )
+    return (
+        f"{model_note}Use the input image as the primary source. Replace only the visible text "
+        f"{old_literal} with exactly {new_literal}, character for character. Do not add, remove, "
+        "rewrite, translate, substitute homophones, or invent any character. Preserve every person, "
+        "object, background detail, composition, crop, color, lighting, and all other text unchanged. "
+        "Keep the replacement in the same region and match the original typography, perspective, "
+        "material, artistic style, spacing, contrast, and readable text area. "
+        f"Additional user instruction: {user_prompt.strip()}"
+    ).strip()
 
 
 def _environment_value(name: str) -> str:
@@ -623,22 +672,64 @@ def _parse_api_response(raw: bytes) -> dict[str, Any]:
     return result
 
 
+def _safe_preconnect_failure(exc: BaseException) -> bool:
+    """Return true only when the request clearly failed before a connection existed."""
+    reason: BaseException = exc
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, BaseException):
+        reason = exc.reason
+    if isinstance(reason, (socket.timeout, TimeoutError)):
+        return False
+    if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
+        return True
+    if isinstance(reason, OSError):
+        return reason.errno in {
+            errno.ECONNREFUSED,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+            errno.EADDRNOTAVAIL,
+        }
+    return False
+
+
+def submit_with_safe_retries(
+    submit: Any,
+    *,
+    on_attempt: Any | None = None,
+) -> tuple[dict[str, Any], int]:
+    """Submit at most three times, but only for explicitly safe transient failures."""
+    for attempt in range(1, MAX_SAFE_SUBMIT_ATTEMPTS + 1):
+        if on_attempt is not None:
+            on_attempt(attempt)
+        try:
+            result = submit()
+            return result, attempt
+        except UpstreamSubmitError as exc:
+            if not exc.safe_to_retry or attempt >= MAX_SAFE_SUBMIT_ATTEMPTS:
+                raise
+            time.sleep(SAFE_RETRY_BACKOFF_SECONDS[attempt - 1])
+    raise AssertionError("unreachable")
+
+
 def _post_image_request(
     endpoint: str,
     key: str,
     body: bytes,
     content_type: str,
     timeout: int,
+    idempotency_key: str = "",
 ) -> dict[str, Any]:
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": content_type,
+        "Accept": "application/json",
+        "User-Agent": f"Matrixapi-imagegen-skill/{SKILL_VERSION}",
+    }
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     request = urllib.request.Request(
         endpoint,
         data=body,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": content_type,
-            "Accept": "application/json",
-            "User-Agent": f"Matrixapi-imagegen-skill/{SKILL_VERSION}",
-        },
+        headers=headers,
         method="POST",
     )
     try:
@@ -646,9 +737,16 @@ def _post_image_request(
             raw = _read_limited(response, MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         detail = _safe_http_detail(exc, key)
-        raise ImageGenError(_format_upstream_error(detail, exc.code)) from exc
+        raise UpstreamSubmitError(
+            _format_upstream_error(detail, exc.code),
+            safe_to_retry=exc.code in SAFE_RETRY_STATUS_CODES,
+            status_code=exc.code,
+        ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ImageGenError(f"Image API request failed: {exc}") from exc
+        raise UpstreamSubmitError(
+            f"Image API request failed: {exc}",
+            safe_to_retry=_safe_preconnect_failure(exc),
+        ) from exc
     return _parse_api_response(raw)
 
 
@@ -682,6 +780,7 @@ def call_api(
     async_mode: bool = False,
     webhook: str = "",
     metadata: dict[str, Any] | None = None,
+    idempotency_key: str = "",
 ) -> dict[str, Any]:
     """Call the JSON generations endpoint."""
     payload: dict[str, Any] = {
@@ -709,6 +808,7 @@ def call_api(
         json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         "application/json",
         timeout,
+        idempotency_key,
     )
 
 
@@ -822,6 +922,44 @@ def _input_image_bytes(paths: Iterable[str], mask_path: str | None = None) -> in
     return total
 
 
+def _prepare_upload_files(
+    image_paths: list[str], mask_path: str | None = None
+) -> tuple[
+    list[tuple[str, str, str, bytes]],
+    int,
+    dict[str, Any],
+]:
+    """Read local references once for both fingerprinting and multipart upload."""
+    files: list[tuple[str, str, str, bytes]] = []
+    image_fingerprints: list[dict[str, Any]] = []
+    total_bytes = 0
+    for path in image_paths:
+        filename, mime, data = _input_image(path, "Input image")
+        total_bytes += len(data)
+        files.append(("image", filename, mime, data))
+        image_fingerprints.append(
+            {
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "bytes": len(data),
+                "mime": mime,
+            }
+        )
+    mask_fingerprint = None
+    if mask_path:
+        filename, mime, data = _input_image(mask_path, "Mask image")
+        total_bytes += len(data)
+        files.append(("mask", filename, mime, data))
+        mask_fingerprint = {
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "mime": mime,
+        }
+    return files, total_bytes, {
+        "images": image_fingerprints,
+        "mask": mask_fingerprint,
+    }
+
+
 def _input_mime(data: bytes, path: Path) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -879,12 +1017,19 @@ def call_edit_api(
     mask_path: str | None,
     timeout: int,
     options: dict[str, str] | None = None,
+    prepared_files: list[tuple[str, str, str, bytes]] | None = None,
+    idempotency_key: str = "",
 ) -> dict[str, Any]:
     if not image_paths:
         raise ImageGenError("At least one --image file is required for editing")
     if len(image_paths) > MAX_INPUT_IMAGES:
         raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
-    total_input_bytes = _input_image_bytes(image_paths, mask_path)
+    if prepared_files is None:
+        prepared_files, total_input_bytes, _ = _prepare_upload_files(
+            image_paths, mask_path
+        )
+    else:
+        total_input_bytes = sum(len(item[3]) for item in prepared_files)
     if total_input_bytes > MAX_MULTIPART_BODY_BYTES:
         limit_mib = MAX_MULTIPART_BODY_BYTES // (1024 * 1024)
         actual_mib = total_input_bytes / (1024 * 1024)
@@ -908,16 +1053,10 @@ def call_edit_api(
     if options:
         fields.extend(options.items())
 
-    files: list[tuple[str, str, str, bytes]] = []
-    for path in image_paths:
-        filename, mime, data = _input_image(path, "Input image")
-        files.append(("image", filename, mime, data))
-    if mask_path:
-        filename, mime, data = _input_image(mask_path, "Mask image")
-        files.append(("mask", filename, mime, data))
-
-    body, content_type = _multipart_body(fields, files)
-    return _post_image_request(endpoint, key, body, content_type, timeout)
+    body, content_type = _multipart_body(fields, prepared_files)
+    return _post_image_request(
+        endpoint, key, body, content_type, timeout, idempotency_key
+    )
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -1034,6 +1173,220 @@ def normalize_task_id(value: str | None = None) -> str:
 
 def result_record_path(output_dir: Path, task_id: str) -> Path:
     return output_dir.expanduser().resolve() / f"result-{task_id}.json"
+
+
+def _idempotency_scope(task_id: str) -> str:
+    thread_id = os.environ.get("CODEX_THREAD_ID", "").strip()
+    session_id = os.environ.get("CODEX_SESSION_ID", "").strip()
+    if thread_id:
+        return f"thread:{thread_id}"
+    if session_id:
+        return f"session:{session_id}"
+    # Outside Codex, keep requests isolated instead of deduplicating unrelated
+    # users that happen to share the same prompt and API key.
+    return f"task:{task_id}"
+
+
+def request_fingerprint(
+    task_id: str,
+    request: dict[str, Any],
+    force_new: bool = False,
+) -> str:
+    canonical = {
+        "version": IDEMPOTENCY_VERSION,
+        "scope": _idempotency_scope(task_id),
+        "request": request,
+    }
+    if force_new:
+        canonical["force_new_task_id"] = task_id
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def idempotency_record_path(output_dir: Path, fingerprint: str) -> Path:
+    return (
+        output_dir.expanduser().resolve()
+        / ".idempotency"
+        / f"{fingerprint}.json"
+    )
+
+
+def _load_idempotency_record(path: Path) -> dict[str, Any] | None:
+    try:
+        if path.stat().st_size > 4 * 1024 * 1024:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _cached_result_files_exist(payload: dict[str, Any]) -> bool:
+    paths = payload.get("preview_files") or payload.get("download_files")
+    if not isinstance(paths, list) or not paths:
+        return False
+    return all(isinstance(path, str) and Path(path).is_file() for path in paths)
+
+
+def claim_idempotency(
+    output_dir: Path,
+    fingerprint: str,
+    task_id: str,
+    timeout: int,
+) -> tuple[Path, Path, dict[str, Any] | None]:
+    """Claim a fixed fingerprint or return its existing successful result."""
+    record_path = idempotency_record_path(output_dir, fingerprint)
+    lock_path = record_path.with_suffix(".lock")
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        now_ms = time.time_ns() // 1_000_000
+        record = _load_idempotency_record(record_path)
+        if record:
+            age_ms = now_ms - int(record.get("created_at_ms") or 0)
+            if 0 <= age_ms <= IDEMPOTENCY_TTL_MS:
+                status = record.get("status")
+                if status == "success":
+                    payload = record.get("payload")
+                    if isinstance(payload, dict) and _cached_result_files_exist(payload):
+                        return record_path, lock_path, payload
+                elif status == "failed":
+                    detail = str(record.get("error") or "previous identical request failed")
+                    raise ImageGenError(
+                        "An identical request in this Codex conversation already failed and "
+                        "will not be submitted again automatically. Use --force-new only after "
+                        f"you explicitly decide to retry. Previous error: {detail[:800]}"
+                    )
+            else:
+                try:
+                    record_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                lock_age_ms = now_ms - int(lock_path.stat().st_mtime_ns // 1_000_000)
+            except (FileNotFoundError, OSError):
+                continue
+            if lock_age_ms > IDEMPOTENCY_TTL_MS:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise ImageGenError(
+                    "An identical image request is still running; it was not submitted again"
+                )
+            time.sleep(IDEMPOTENCY_WAIT_INTERVAL_SECONDS)
+            continue
+
+        os.close(descriptor)
+        _atomic_write_json(
+            record_path,
+            {
+                "version": IDEMPOTENCY_VERSION,
+                "fingerprint": fingerprint,
+                "status": "in_progress",
+                "task_id": task_id,
+                "created_at_ms": now_ms,
+            },
+        )
+        return record_path, lock_path, None
+
+
+def finish_idempotency(
+    record_path: Path | None,
+    lock_path: Path | None,
+    fingerprint: str | None,
+    task_id: str | None,
+    payload: dict[str, Any] | None = None,
+    error: str | None = None,
+    attempt_count: int | None = None,
+) -> None:
+    if record_path is None or fingerprint is None or task_id is None:
+        return
+    now_ms = time.time_ns() // 1_000_000
+    record = {
+        "version": IDEMPOTENCY_VERSION,
+        "fingerprint": fingerprint,
+        "status": "success" if payload is not None else "failed",
+        "task_id": task_id,
+        "created_at_ms": now_ms,
+    }
+    if payload is not None:
+        record["payload"] = payload
+    else:
+        record["error"] = (error or "request failed")[:1000]
+    if attempt_count is not None:
+        record["attempt_count"] = attempt_count
+    try:
+        _atomic_write_json(record_path, record)
+        _schedule_result_hide(record_path)
+    except ImageGenError:
+        pass
+    finally:
+        if lock_path is not None:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def update_idempotency_attempt(
+    record_path: Path | None,
+    fingerprint: str | None,
+    task_id: str | None,
+    attempt: int,
+) -> None:
+    if record_path is None or fingerprint is None or task_id is None:
+        return
+    now_ms = time.time_ns() // 1_000_000
+    try:
+        _atomic_write_json(
+            record_path,
+            {
+                "version": IDEMPOTENCY_VERSION,
+                "fingerprint": fingerprint,
+                "status": "in_progress",
+                "task_id": task_id,
+                "created_at_ms": now_ms,
+                "attempt_count": attempt,
+            },
+        )
+    except ImageGenError:
+        pass
+
+
+def emit_reused_success(
+    cached_payload: dict[str, Any],
+    output_dir: Path,
+    task_id: str,
+    request_started_at_ms: int,
+) -> dict[str, Any]:
+    payload = dict(cached_payload)
+    reused_from_task_id = payload.get("task_id")
+    for key in (
+        "task_id",
+        "request_started_at_ms",
+        "request_started_at",
+        "completed_at_ms",
+        "completed_at",
+        "result_file",
+        "result_match",
+        "result_hide_delay_ms",
+    ):
+        payload.pop(key, None)
+    payload["idempotency_reused"] = True
+    payload["reused_from_task_id"] = reused_from_task_id
+    return emit_success(payload, output_dir, task_id, request_started_at_ms)
 
 
 def ensure_new_task(output_dir: Path, task_id: str) -> None:
@@ -1409,6 +1762,11 @@ def parse_args() -> argparse.Namespace:
         help="Unique id for matching this command's result without scanning output directories",
     )
     parser.add_argument(
+        "--force-new",
+        action="store_true",
+        help="Explicitly submit a new paid request even when an identical recent result exists",
+    )
+    parser.add_argument(
         "--story-pages",
         type=int,
         help="Start a sequential comic story with this many pages; each command returns one page",
@@ -1474,6 +1832,17 @@ def parse_args() -> argparse.Namespace:
         help="只处理已有 --image 文件，不调用图片 API",
     )
     parser.add_argument(
+        "--precise-text",
+        action="store_true",
+        help="只在本地替换已知文字区域，不调用生图 API",
+    )
+    parser.add_argument("--replace-text", help="模型局部改字时需要替换的原文字")
+    parser.add_argument("--new-text", help="--precise-text 要写入的新文字")
+    parser.add_argument("--text-box", help="文字区域 x,y,width,height")
+    parser.add_argument("--font-path", help="可选字体文件路径")
+    parser.add_argument("--font-size", type=int, help="可选字体大小")
+    parser.add_argument("--text-color", help="文字颜色，例如 #FFFFFF")
+    parser.add_argument(
         "--timeout",
         type=int,
         default=600,
@@ -1496,6 +1865,10 @@ def main() -> int:
     story_begun = False
     story_root_prompt: str | None = None
     story_page: int | None = None
+    idempotency_fingerprint: str | None = None
+    idempotency_record: Path | None = None
+    idempotency_lock: Path | None = None
+    submit_attempt_count = 0
     try:
         if args.n < 1 or args.n > 4:
             raise ImageGenError("Image count must be between 1 and 4")
@@ -1503,6 +1876,57 @@ def main() -> int:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
         if args.output_quality is not None and not 1 <= args.output_quality <= 100:
             raise ImageGenError("--output-quality must be between 1 and 100")
+        if args.precise_text:
+            if args.process_only or args.story_pages is not None or args.story_next is not None:
+                raise ImageGenError("--precise-text cannot be combined with story/process modes")
+            if not args.images or len(args.images) != 1:
+                raise ImageGenError("--precise-text requires exactly one --image")
+            if not args.new_text or not args.text_box:
+                raise ImageGenError("--precise-text requires --new-text and --text-box")
+            task_id = normalize_task_id(args.task_id)
+            output_dir = args.postprocess_dir or args.out_dir or (
+                Path.home() / ".codex" / "generated_images" / SKILL_NAME / "processed"
+            )
+            ensure_new_task(output_dir, task_id)
+            try:
+                item = precise_text_edit(
+                    args.images[0],
+                    output_dir,
+                    text=args.new_text,
+                    text_box=args.text_box,
+                    font_path=args.font_path,
+                    font_size=args.font_size,
+                    text_color=args.text_color,
+                    background_color=args.output_background,
+                )
+            except PostprocessError as exc:
+                raise ImageGenError(str(exc)) from exc
+            output = str(Path(item["output"]).resolve())
+            normalized_output = Path(output).as_posix()
+            emit_success(
+                {
+                    "ok": True,
+                    "skill_name": SKILL_NAME,
+                    "version": SKILL_VERSION,
+                    "mode": "precise-text-local",
+                    "model": None,
+                    "count": 1,
+                    "files": [output],
+                    "original_files": preview_paths([args.images[0]]),
+                    "processed_files": [output],
+                    "preview_files": [normalized_output],
+                    "download_files": [normalized_output],
+                    "text_edit": item,
+                },
+                output_dir,
+                task_id,
+                request_started_at_ms,
+            )
+            return 0
+        if bool(args.replace_text) != bool(args.new_text):
+            raise ImageGenError("Model text editing requires both --replace-text and --new-text")
+        if args.replace_text and not args.images:
+            raise ImageGenError("Model text editing requires the exact source image via --image")
         if args.story_pages is not None and args.story_next is not None:
             raise ImageGenError("Use --story-pages or --story-next, not both")
         if args.story_pages is not None:
@@ -1631,6 +2055,8 @@ def main() -> int:
                             "stream",
                             "sequential-story",
                             "local-process",
+                            "model-text-edit",
+                            "precise-text-local",
                         ],
                     },
                     ensure_ascii=False,
@@ -1659,6 +2085,13 @@ def main() -> int:
             )
         else:
             raw_prompt = (args.prompt or "").strip()
+        if args.replace_text:
+            raw_prompt = build_exact_text_edit_prompt(
+                raw_prompt,
+                args.replace_text,
+                args.new_text,
+                model,
+            )
         if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
         original_prompt_chars = len(raw_prompt)
@@ -1726,8 +2159,25 @@ def main() -> int:
             )
         edit_input_size = None
         input_bytes = None
+        prepared_files: list[tuple[str, str, str, bytes]] | None = None
+        local_reference_fingerprint: dict[str, Any] = {
+            "images": [],
+            "mask": None,
+        }
         if image_paths:
-            input_bytes = _input_image_bytes(image_paths, args.mask)
+            (
+                prepared_files,
+                input_bytes,
+                local_reference_fingerprint,
+            ) = _prepare_upload_files(image_paths, args.mask)
+            if input_bytes > MAX_MULTIPART_BODY_BYTES:
+                limit_mib = MAX_MULTIPART_BODY_BYTES // (1024 * 1024)
+                actual_mib = input_bytes / (1024 * 1024)
+                raise ImageGenError(
+                    "Combined input images are too large for one upload "
+                    f"({actual_mib:.1f} MiB; limit {limit_mib} MiB). "
+                    "The images were not sent and no task was charged."
+                )
             edit_input_size = legacy_pixel_size(requested_size, aspect_ratio)
             size = edit_input_size
             size = edit_working_size(size, model)
@@ -1757,6 +2207,59 @@ def main() -> int:
                 "the automatic async path does not attach metadata to multipart requests"
             )
 
+        idempotency_fingerprint = request_fingerprint(
+            task_id,
+            {
+                "base_url": base_url,
+                "mode": mode,
+                "model": model,
+                "prompt": prompt,
+                "replace_text": args.replace_text or "",
+                "new_text": args.new_text or "",
+                "size": size,
+                "requested_size": requested_size,
+                "quality": quality,
+                "aspect_ratio": aspect_ratio,
+                "n": args.n,
+                "stream": args.stream,
+                "async": async_mode,
+                "webhook": args.webhook or "",
+                "metadata": metadata,
+                "background": args.background or "",
+                "input_fidelity": args.input_fidelity or "",
+                "reference_urls": reference_urls,
+                "local_references": local_reference_fingerprint,
+                "story_pages": args.story_pages,
+                "story_page": story_page,
+                "output_size": args.output_size or "",
+                "fit": args.fit,
+                "position": args.position,
+                "crop": args.crop or "",
+                "output_format": args.output_format,
+                "output_quality": args.output_quality,
+                "output_background": args.output_background or "",
+            },
+            force_new=args.force_new,
+        )
+        (
+            idempotency_record,
+            idempotency_lock,
+            cached_payload,
+        ) = claim_idempotency(
+            output_dir,
+            idempotency_fingerprint,
+            task_id,
+            args.timeout,
+        )
+        if cached_payload is not None:
+            emit_reused_success(
+                cached_payload,
+                output_dir,
+                task_id,
+                request_started_at_ms,
+            )
+            return 0
+
         if args.story_next is not None:
             if story_path is None:
                 raise ImageGenError("Story state path is missing")
@@ -1778,6 +2281,16 @@ def main() -> int:
             story_begun = True
 
         options = _option_fields(quality, args.background, args.input_fidelity)
+        def record_submit_attempt(attempt: int) -> None:
+            nonlocal submit_attempt_count
+            submit_attempt_count = attempt
+            update_idempotency_attempt(
+                idempotency_record,
+                idempotency_fingerprint,
+                task_id,
+                attempt,
+            )
+
         if image_paths:
             # The pinned relay can convert GPT Image 2 multipart edits to its
             # JSON reference-image flow, so preserve the requested ratio in
@@ -1788,38 +2301,47 @@ def main() -> int:
                 options["stream"] = "true"
             if async_mode:
                 options["async"] = "true"
-            result = call_edit_api(
-                edit_url,
-                key,
-                model,
-                prompt,
-                size,
-                args.n,
-                image_paths,
-                args.mask,
-                args.timeout,
-                options,
+            result, submit_attempt_count = submit_with_safe_retries(
+                lambda: call_edit_api(
+                    edit_url,
+                    key,
+                    model,
+                    prompt,
+                    size,
+                    args.n,
+                    image_paths,
+                    args.mask,
+                    args.timeout,
+                    options,
+                    prepared_files,
+                    idempotency_fingerprint,
+                ),
+                on_attempt=record_submit_attempt,
             )
             result_endpoint = generation_url if async_mode else edit_url
             if async_mode:
                 result = wait_for_task(result, generation_url, key, args.timeout)
         else:
             options["aspect_ratio"] = aspect_ratio
-            result = call_api(
-                generation_url,
-                key,
-                model,
-                prompt,
-                size,
-                args.n,
-                args.timeout,
-                options,
-                aspect_ratio=aspect_ratio,
-                image_urls=reference_urls or None,
-                stream=args.stream,
-                async_mode=async_mode,
-                webhook=args.webhook or "",
-                metadata=metadata,
+            result, submit_attempt_count = submit_with_safe_retries(
+                lambda: call_api(
+                    generation_url,
+                    key,
+                    model,
+                    prompt,
+                    size,
+                    args.n,
+                    args.timeout,
+                    options,
+                    aspect_ratio=aspect_ratio,
+                    image_urls=reference_urls or None,
+                    stream=args.stream,
+                    async_mode=async_mode,
+                    webhook=args.webhook or "",
+                    metadata=metadata,
+                    idempotency_key=idempotency_fingerprint,
+                ),
+                on_attempt=record_submit_attempt,
             )
             result_endpoint = generation_url
             if async_mode:
@@ -1857,6 +2379,13 @@ def main() -> int:
                 )
             except PostprocessError as exc:
                 _fail_story_page(story_path, task_id, str(exc))
+                finish_idempotency(
+                    idempotency_record,
+                    idempotency_lock,
+                    idempotency_fingerprint,
+                    task_id,
+                    error=str(exc),
+                )
                 print(
                     json.dumps(
                         {
@@ -1909,6 +2438,7 @@ def main() -> int:
             "stream": args.stream,
             "input_images": len(image_paths) + len(reference_urls),
             "input_bytes": input_bytes,
+            "submit_attempts": submit_attempt_count,
             "mask": bool(args.mask),
             "files": files,
             "original_files": original_files,
@@ -1920,6 +2450,16 @@ def main() -> int:
         }
         if story_payload is not None:
             success_payload["story"] = story_payload
+        cached_success_payload = dict(success_payload)
+        cached_success_payload["task_id"] = task_id
+        finish_idempotency(
+            idempotency_record,
+            idempotency_lock,
+            idempotency_fingerprint,
+            task_id,
+            payload=cached_success_payload,
+            attempt_count=submit_attempt_count,
+        )
         emit_success(
             success_payload,
             output_dir,
@@ -1929,6 +2469,14 @@ def main() -> int:
         return 0
     except ImageGenError as exc:
         _fail_story_page(story_path, task_id, str(exc))
+        finish_idempotency(
+            idempotency_record,
+            idempotency_lock,
+            idempotency_fingerprint,
+            task_id,
+            error=str(exc),
+            attempt_count=submit_attempt_count or None,
+        )
         print(
             json.dumps(
                 {
