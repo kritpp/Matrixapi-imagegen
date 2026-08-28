@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 
 DEFAULT_MODEL = "gpt-image-2"
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.18"
+SKILL_VERSION = "1.8.19"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -882,9 +882,14 @@ def wait_for_task(
 ) -> dict[str, Any]:
     if result.get("data"):
         return result
-    task_id = str(result.get("id") or result.get("task_id") or "").strip()
+    task_id = extract_async_task_id(result)
     if not task_id:
-        raise ImageGenError("Async image API response did not include a task id")
+        fields = ", ".join(sorted(str(k) for k in result.keys()))
+        raise ImageGenError(
+            "Async image API response did not include a task id; "
+            f"response fields: {fields or '(none)'}. "
+            "The request will not be resubmitted to avoid duplicate billing."
+        )
     deadline = time.monotonic() + timeout
     status_url = _status_endpoint(endpoint, task_id)
     latest = result
@@ -906,6 +911,39 @@ def wait_for_task(
         # keeping a single status request in flight.
         time.sleep(1)
     raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
+
+
+def extract_async_task_id(result: Any) -> str:
+    """Extract task identifiers used by compatible async image relays.
+
+    Relays differ in casing and nesting (``taskId``, ``task_id``, or
+    ``task: {id: ...}``).  Only task-shaped fields are searched recursively;
+    arbitrary nested image IDs are not treated as task IDs.
+    """
+    if not isinstance(result, dict):
+        return ""
+    for key in ("task_id", "taskId", "taskID"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    task = result.get("task")
+    if isinstance(task, str) and task.strip():
+        return task.strip()
+    if isinstance(task, dict):
+        nested = extract_async_task_id(task)
+        if nested:
+            return nested
+        value = task.get("id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for key in ("data", "result", "response"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            nested = extract_async_task_id(value)
+            if nested:
+                return nested
+    value = result.get("id")
+    return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
 def _safe_filename(path: Path) -> str:
