@@ -139,7 +139,7 @@ class SkillUpdateTests(unittest.TestCase):
             self.assertEqual(payload["supported_models"], ["gpt-image-2", "gpt-image-2-pro"])
 
     def test_local_release_updates_atomically_without_touching_external_data(self):
-        package = Path(__file__).parents[1] / "Matrixapi-imagegen-v1.8.13.zip"
+        package = Path(__file__).parents[1] / "Matrixapi-imagegen-v1.8.17.zip"
         with TemporaryDirectory() as root:
             root_path = Path(root)
             target = root_path / "skills" / "Matrixapi-imagegen"
@@ -158,7 +158,7 @@ class SkillUpdateTests(unittest.TestCase):
             ):
                 installed = MODULE.update_skill(package.resolve().as_uri(), target)
 
-            self.assertEqual(installed["skill_version"], "1.8.13")
+            self.assertEqual(installed["skill_version"], "1.8.17")
             self.assertFalse((target / "old-only.txt").exists())
             self.assertTrue((target / "scripts" / "update_skill.py").is_file())
             self.assertEqual(external_config.read_text(encoding="utf-8"), "IMAGEGEN_API_KEY=unchanged")

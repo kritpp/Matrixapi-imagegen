@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 
 DEFAULT_MODEL = "gpt-image-2"
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.13"
+SKILL_VERSION = "1.8.17"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -138,22 +138,55 @@ def _format_upstream_error(detail: str, status_code: int | None = None) -> str:
     return f"{status} [{category}] {explanation} 原始信息: {raw}"
 
 
+EXACT_TEXT_PATTERNS = (
+    r"“[^”]{1,400}”",
+    r"「[^」]{1,400}」",
+    r"《[^》]{1,400}》",
+    r'"[^"]{1,400}"',
+    r"'[^']{1,400}'",
+)
+
+
+def _exact_text_segments(prompt: str) -> list[str]:
+    """Return quoted text that must survive prompt compaction verbatim."""
+    found: list[str] = []
+    for pattern in EXACT_TEXT_PATTERNS:
+        for match in re.finditer(pattern, prompt):
+            value = match.group(0)
+            if value not in found:
+                found.append(value)
+    return found
+
+
 def compact_prompt(prompt: str, limit: int = PROMPT_MAX_CHARS) -> tuple[str, bool]:
-    """Keep an overlong prompt within the upstream limit without a retry."""
+    """Keep an overlong prompt within the upstream limit without losing exact text."""
     normalized = re.sub(r"\s+", " ", prompt).strip()
     if len(normalized) <= limit:
         return normalized, False
 
+    protected = _exact_text_segments(normalized)
+    protected_clause = "；精确文字：" + "，".join(protected) if protected else ""
+    if len(protected_clause) >= limit - 32:
+        raise ImageGenError(
+            "指定文字过长，无法在模型提示词限制内完整保留；本次未发送，也不会扣费。"
+        )
     target = min(limit, PROMPT_COMPACT_TARGET)
     marker = "..."
-    available = max(32, target - len(marker) - 1)
+    available = max(32, target - len(marker) - 1 - len(protected_clause))
     head_budget = max(16, int(available * 0.72))
     tail_budget = max(16, available - head_budget)
     head = normalized[:head_budget].rstrip(" ,;:")
     tail = normalized[-tail_budget:].lstrip(" ,;:")
-    compacted = f"{head}{marker} {tail}".strip()
+    compacted = f"{head}{marker} {tail}{protected_clause}".strip()
     if len(compacted) > limit:
-        compacted = compacted[:limit].rstrip()
+        # Trim only the descriptive head/tail; never truncate the protected
+        # exact-text clause at the end of the prompt.
+        excess = len(compacted) - limit
+        head = head[: max(0, len(head) - excess)].rstrip(" ,;:")
+        compacted = f"{head}{marker} {tail}{protected_clause}".strip()
+        if len(compacted) > limit:
+            tail = tail[: max(0, len(tail) - (len(compacted) - limit))].rstrip(" ,;:")
+            compacted = f"{head}{marker} {tail}{protected_clause}".strip()
     return compacted, True
 
 
@@ -538,21 +571,40 @@ def resolve_aspect_ratio(aspect_ratio: str, image_paths: list[str] | None = None
 
 
 def source_preserving_edit_size(size: str, image_paths: list[str]) -> str:
-    """Scale the first local reference to a tier without cropping its ratio."""
+    """Choose the lowest valid edit tier while preserving source geometry."""
     if not image_paths:
         raise ImageGenError("无法从空的输入图片列表保留编辑比例")
     width, height = image_dimensions(image_paths[0])
     long_edge = max(width, height)
     short_edge = min(width, height)
-    target_long = {"1K": 1024, "2K": 2048, "4K": 3840}.get(size)
-    if target_long is None:
+    tier_edges = {"1K": 1024, "2K": 2048, "4K": 3840}
+    if size not in tier_edges:
         return validate_size(size)
-    scale = target_long / long_edge
-    scaled_long = max(16, int(round(long_edge * scale / 16)) * 16)
-    scaled_short = max(16, int(round(short_edge * scale / 16)) * 16)
-    if width >= height:
-        return validate_size(f"{scaled_long}x{scaled_short}")
-    return validate_size(f"{scaled_short}x{scaled_long}")
+
+    # A very wide/tall source can fall below the relay's minimum total pixels
+    # when scaled to a 1K long edge.  Do not fail locally and make Codex issue a
+    # second paid command.  Silently choose the first valid supported tier and
+    # keep the source ratio; an explicit 2K/4K request remains a lower bound.
+    ordered_tiers = ("1K", "2K", "4K")
+    start = ordered_tiers.index(size)
+    last_error: ImageGenError | None = None
+    for tier in ordered_tiers[start:]:
+        target_long = tier_edges[tier]
+        scale = target_long / long_edge
+        scaled_long = max(16, int(round(long_edge * scale / 16)) * 16)
+        scaled_short = max(16, int(round(short_edge * scale / 16)) * 16)
+        candidate = (
+            f"{scaled_long}x{scaled_short}"
+            if width >= height
+            else f"{scaled_short}x{scaled_long}"
+        )
+        try:
+            return validate_size(candidate)
+        except ImageGenError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ImageGenError("无法为输入图片选择有效的编辑尺寸")
 
 
 def edit_working_size(size: str, model: str) -> str:
@@ -583,7 +635,7 @@ def edit_working_size(size: str, model: str) -> str:
 
 
 def local_postprocess_requested(args: argparse.Namespace) -> bool:
-    """Return whether the caller requested a deterministic local transform."""
+    """Return whether deterministic local output processing was requested."""
     return bool(
         args.output_size
         or args.crop
@@ -593,32 +645,43 @@ def local_postprocess_requested(args: argparse.Namespace) -> bool:
     )
 
 
+def validate_edit_delivery_options(
+    mode: str,
+    aspect_ratio: str,
+    args: argparse.Namespace,
+    story_begun: bool,
+) -> None:
+    """Block Codex-added geometry/post-processing before any paid edit request."""
+    if mode != "edit" or story_begun:
+        return
+    if args.allow_edit_geometry:
+        return
+    if aspect_ratio != "auto":
+        raise ImageGenError(
+            "编辑请求默认保持输入图片比例；本次未发送请求，也不会扣费。"
+            "如客户明确要求改变上游比例，请显式使用 --allow-edit-geometry。"
+        )
+    if local_postprocess_requested(args) and not args.allow_postprocess:
+        raise ImageGenError(
+            "编辑请求默认直接交付上游原图；本次未发送请求，也不会扣费。"
+            "已阻止自动 output-size/cover/fill/crop/格式处理。"
+            "只有客户明确要求本地变换时才可使用 --allow-postprocess。"
+        )
+
+
 def validate_pro_edit_processing(
     model: str,
     mode: str,
     has_reference: bool,
     args: argparse.Namespace,
 ) -> None:
-    """Prevent accidental Pro edit geometry changes before any paid request.
-
-    Pro edits must return the upstream image unchanged unless the caller
-    explicitly opts into deterministic local processing.  This guard keeps a
-    client-side guessed output size from becoming both an upstream ratio and a
-    second local crop/resize operation.
-    """
+    """Backward-compatible helper retained for callers of the 1.8.13 test API."""
+    if model != "gpt-image-2-pro" or mode != "edit" or not has_reference:
+        return
     geometry_requested = getattr(args, "aspect_ratio", "auto") != "auto" or local_postprocess_requested(args)
-    if (
-        model == "gpt-image-2-pro"
-        and mode == "edit"
-        and has_reference
-        and geometry_requested
-        and not args.allow_pro_postprocess
-    ):
+    if geometry_requested and not getattr(args, "allow_pro_postprocess", False):
         raise ImageGenError(
-            "Pro 编辑默认保持输入图片比例并直接返回上游原图；未检测到客户明确的几何变换要求，"
-            "本次未发送请求，也不会扣费。请保持 --aspect-ratio auto，并移除 "
-            "--output-size/--fit/--crop/格式转换；如客户明确要求改变比例、尺寸、裁剪或格式，"
-            "才显式使用 --allow-pro-postprocess。"
+            "Pro 编辑默认保持输入图片比例并直接返回上游原图；本次未发送请求，也不会扣费。"
         )
 
 
@@ -1117,7 +1180,14 @@ def _idempotency_scope(task_id: str) -> str:
         return f"thread:{thread_id}"
     if session_id:
         return f"session:{session_id}"
-    return f"task:{task_id}"
+    # Codex may omit both identifiers.  Never fall back to task_id here:
+    # retries legitimately receive a fresh task id, and using it would make
+    # an identical paid request look new and defeat duplicate-charge guards.
+    # The request body and ordered reference digests already distinguish
+    # different requests; a conservative process-wide scope is safest when
+    # no conversation identifier is available.  ``task_id`` remains part of
+    # the result record, but not the idempotency fingerprint.
+    return "process"
 
 
 def _local_reference_fingerprint(
@@ -1714,9 +1784,14 @@ def parse_args() -> argparse.Namespace:
         help="本地最终输出尺寸 WIDTHxHEIGHT；生成完成后精确缩放/裁剪，不发送给模型",
     )
     parser.add_argument(
-        "--allow-pro-postprocess",
+        "--allow-postprocess",
         action="store_true",
-        help="仅在客户明确要求比例/最终尺寸/裁剪/格式时，允许 Pro 编辑改变几何或执行一次本地处理",
+        help="仅在客户明确要求本地尺寸、裁剪或格式转换时允许编辑后处理",
+    )
+    parser.add_argument(
+        "--allow-edit-geometry",
+        action="store_true",
+        help="仅在客户明确要求上游编辑比例时允许发送非 auto 比例",
     )
     parser.add_argument(
         "--fit",
@@ -2029,12 +2104,6 @@ def main() -> int:
             )
 
         mode = "edit" if (image_paths or reference_urls) else "generate"
-        validate_pro_edit_processing(
-            model,
-            mode,
-            bool(image_paths or reference_urls),
-            args,
-        )
         if image_paths and aspect_ratio == "auto":
             aspect_ratio, aspect_ratio_source = resolve_aspect_ratio(
                 aspect_ratio, image_paths
@@ -2150,6 +2219,13 @@ def main() -> int:
                 aspect_ratio,
             )
             story_begun = True
+
+        validate_edit_delivery_options(
+            mode,
+            aspect_ratio,
+            args,
+            story_begun,
+        )
 
         options = _option_fields(quality, args.background, args.input_fidelity)
         if image_paths:

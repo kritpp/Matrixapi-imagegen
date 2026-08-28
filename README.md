@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.13**
+Current release: **v1.8.17**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.13](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.13.zip)
+[下载 Matrixapi-imagegen v1.8.17](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.17.zip)
 
 解压后按系统运行安装程序：
 
@@ -19,9 +19,7 @@ Current release: **v1.8.13**
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
-本版本对 Pro 编辑默认直接交付上游原图：未明确指定最终尺寸时，不发送固定 `3:2`，
-也不自动执行本地 `output-size`、`cover` 或 `fill`。只有客户明确要求本地尺寸、裁剪或格式转换时，
-才显式使用 `--allow-pro-postprocess`。4K、普通生成和渠道配置不变。
+本版本对编辑请求默认使用上游最低 `1K` 档位并保持输入图片比例；只有上游明确拒绝最低档位且确认未扣费时才静默升级一次到 `2K`。不执行尺寸预检、裁剪或本地重绘，普通生成和渠道配置不变。
 
 安装位置：
 
