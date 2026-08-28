@@ -1576,6 +1576,11 @@ def parse_args() -> argparse.Namespace:
         "--prompt",
         help="Prompt text; GPT Image 2 upstream limit is 1024 characters (overlong text is compacted)",
     )
+    parser.add_argument(
+        "--prompt-file",
+        type=Path,
+        help="Read UTF-8 prompt text from a file; avoids shell quoting errors on Windows",
+    )
     parser.add_argument("--model", help="Model id; defaults to IMAGEGEN_MODEL or gpt-image-2")
     parser.add_argument(
         "--image",
@@ -1714,6 +1719,15 @@ def main() -> int:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
     args = parse_args()
+    if args.prompt is not None and args.prompt_file is not None:
+        print("--prompt and --prompt-file cannot be used together", file=sys.stderr)
+        return 2
+    if args.prompt_file is not None:
+        try:
+            args.prompt = args.prompt_file.expanduser().read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"Unable to read --prompt-file: {exc}", file=sys.stderr)
+            return 2
     request_started_at_ms = time.time_ns() // 1_000_000
     task_id: str | None = None
     story_path: Path | None = None
