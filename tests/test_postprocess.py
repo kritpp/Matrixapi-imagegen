@@ -83,9 +83,12 @@ class InputAspectRatioTests(unittest.TestCase):
         Image.new("RGB", size, (20, 80, 160)).save(path)
         return path
 
-    def test_landscape_input_uses_three_two(self) -> None:
+    def test_landscape_input_keeps_auto_for_local_edit(self) -> None:
         source = self._write_image("landscape.png", (1234, 694))
-        self.assertEqual(generate.infer_image_aspect_ratio([str(source)]), "3:2")
+        self.assertEqual(
+            generate.resolve_aspect_ratio("auto", [str(source)]),
+            ("auto", "input_image"),
+        )
 
     def test_portrait_input_uses_two_three(self) -> None:
         source = self._write_image("portrait.png", (694, 1234))
@@ -107,6 +110,13 @@ class InputAspectRatioTests(unittest.TestCase):
         source.write_text("not an image", encoding="utf-8")
         with self.assertRaises(generate.ImageGenError):
             generate.infer_image_aspect_ratio([str(source)])
+
+    def test_auto_edit_size_preserves_wide_source_geometry(self) -> None:
+        source = self._write_image("banner.png", (952, 376))
+        size = generate.source_preserving_edit_size("4K", [str(source)])
+        width, height = (int(value) for value in size.split("x"))
+        self.assertEqual((width, height), (3840, 1520))
+        self.assertLess(abs((width / height) - (952 / 376)), 0.01)
 
 
 class ModelFailureDiagnosisTests(unittest.TestCase):

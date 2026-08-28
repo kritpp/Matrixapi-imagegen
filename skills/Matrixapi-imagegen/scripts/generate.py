@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 
 DEFAULT_MODEL = "gpt-image-2"
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.11"
+SKILL_VERSION = "1.8.12"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -525,13 +525,34 @@ def infer_image_aspect_ratio(image_paths: list[str]) -> str:
 
 
 def resolve_aspect_ratio(aspect_ratio: str, image_paths: list[str] | None = None) -> tuple[str, str]:
-    """Resolve auto ratio and report whether it came from the input image."""
+    """Resolve an explicit ratio without forcing a local edit into a crop."""
     normalized = validate_aspect_ratio(aspect_ratio)
     if normalized != "auto":
         return normalized, "user"
     if image_paths:
-        return infer_image_aspect_ratio(image_paths), "input_image"
+        # For local edits, ``auto`` means preserve source geometry. The old
+        # implementation chose the nearest enum ratio and silently re-composed
+        # wide banners and other non-standard layouts.
+        return "auto", "input_image"
     return normalized, "model_default"
+
+
+def source_preserving_edit_size(size: str, image_paths: list[str]) -> str:
+    """Scale the first local reference to a tier without cropping its ratio."""
+    if not image_paths:
+        raise ImageGenError("无法从空的输入图片列表保留编辑比例")
+    width, height = image_dimensions(image_paths[0])
+    long_edge = max(width, height)
+    short_edge = min(width, height)
+    target_long = {"1K": 1024, "2K": 2048, "4K": 3840}.get(size)
+    if target_long is None:
+        return validate_size(size)
+    scale = target_long / long_edge
+    scaled_long = max(16, int(round(long_edge * scale / 16)) * 16)
+    scaled_short = max(16, int(round(short_edge * scale / 16)) * 16)
+    if width >= height:
+        return validate_size(f"{scaled_long}x{scaled_short}")
+    return validate_size(f"{scaled_short}x{scaled_long}")
 
 
 def edit_working_size(size: str, model: str) -> str:
@@ -1971,7 +1992,12 @@ def main() -> int:
         input_bytes = None
         if image_paths:
             input_bytes = _input_image_bytes(image_paths, args.mask)
-            edit_input_size = legacy_pixel_size(requested_size, aspect_ratio)
+            if aspect_ratio == "auto":
+                edit_input_size = source_preserving_edit_size(
+                    requested_size, image_paths
+                )
+            else:
+                edit_input_size = legacy_pixel_size(requested_size, aspect_ratio)
             size = edit_input_size
             size = edit_working_size(size, model)
         else:
@@ -2076,11 +2102,10 @@ def main() -> int:
 
         options = _option_fields(quality, args.background, args.input_fidelity)
         if image_paths:
-            # The pinned relay can convert GPT Image 2 multipart edits to its
-            # JSON reference-image flow, so preserve the requested ratio in
-            # the multipart fields as well. Older multipart providers may
-            # ignore this extra field.
-            options["aspect_ratio"] = aspect_ratio
+            # For auto local edits the pixel size is the source-ratio signal;
+            # do not send a forced 1:1/3:2/2:3 enum that would re-compose it.
+            if aspect_ratio != "auto":
+                options["aspect_ratio"] = aspect_ratio
             if args.stream:
                 options["stream"] = "true"
             if async_mode:
