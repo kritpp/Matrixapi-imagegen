@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 
 DEFAULT_MODEL = "gpt-image-2"
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.13"
+SKILL_VERSION = "1.8.12"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -580,46 +580,6 @@ def edit_working_size(size: str, model: str) -> str:
             working_height -= 16
 
     return validate_size(f"{working_width}x{working_height}")
-
-
-def local_postprocess_requested(args: argparse.Namespace) -> bool:
-    """Return whether the caller requested a deterministic local transform."""
-    return bool(
-        args.output_size
-        or args.crop
-        or args.output_format != "same"
-        or args.output_quality is not None
-        or args.output_background
-    )
-
-
-def validate_pro_edit_processing(
-    model: str,
-    mode: str,
-    has_reference: bool,
-    args: argparse.Namespace,
-) -> None:
-    """Prevent accidental Pro edit geometry changes before any paid request.
-
-    Pro edits must return the upstream image unchanged unless the caller
-    explicitly opts into deterministic local processing.  This guard keeps a
-    client-side guessed output size from becoming both an upstream ratio and a
-    second local crop/resize operation.
-    """
-    geometry_requested = getattr(args, "aspect_ratio", "auto") != "auto" or local_postprocess_requested(args)
-    if (
-        model == "gpt-image-2-pro"
-        and mode == "edit"
-        and has_reference
-        and geometry_requested
-        and not args.allow_pro_postprocess
-    ):
-        raise ImageGenError(
-            "Pro 编辑默认保持输入图片比例并直接返回上游原图；未检测到客户明确的几何变换要求，"
-            "本次未发送请求，也不会扣费。请保持 --aspect-ratio auto，并移除 "
-            "--output-size/--fit/--crop/格式转换；如客户明确要求改变比例、尺寸、裁剪或格式，"
-            "才显式使用 --allow-pro-postprocess。"
-        )
 
 
 def should_auto_async_local_edit(
@@ -1714,11 +1674,6 @@ def parse_args() -> argparse.Namespace:
         help="本地最终输出尺寸 WIDTHxHEIGHT；生成完成后精确缩放/裁剪，不发送给模型",
     )
     parser.add_argument(
-        "--allow-pro-postprocess",
-        action="store_true",
-        help="仅在客户明确要求比例/最终尺寸/裁剪/格式时，允许 Pro 编辑改变几何或执行一次本地处理",
-    )
-    parser.add_argument(
         "--fit",
         choices=("cover", "contain", "fill", "inside", "outside"),
         default="cover",
@@ -2029,12 +1984,6 @@ def main() -> int:
             )
 
         mode = "edit" if (image_paths or reference_urls) else "generate"
-        validate_pro_edit_processing(
-            model,
-            mode,
-            bool(image_paths or reference_urls),
-            args,
-        )
         if image_paths and aspect_ratio == "auto":
             aspect_ratio, aspect_ratio_source = resolve_aspect_ratio(
                 aspect_ratio, image_paths
@@ -2210,7 +2159,13 @@ def main() -> int:
         )
         original_files = preview_paths(files)
         processed_files = files.copy()
-        postprocess_requested = local_postprocess_requested(args)
+        postprocess_requested = bool(
+            args.output_size
+            or args.crop
+            or args.output_format != "same"
+            or args.output_quality is not None
+            or args.output_background
+        )
         postprocess_manifest = None
         if postprocess_requested:
             processed_dir = args.postprocess_dir or (output_dir / "processed")
