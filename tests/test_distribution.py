@@ -26,7 +26,7 @@ class DistributionTests(unittest.TestCase):
     def test_domain_name_and_version_are_adapted(self) -> None:
         generate = (SKILL / "scripts" / "generate.py").read_text(encoding="utf-8")
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn('SKILL_VERSION = "1.8.12"', generate)
+        self.assertIn('SKILL_VERSION = "1.8.13"', generate)
         self.assertIn('DEFAULT_MODEL = "gpt-image-2"', generate)
         self.assertIn('DEFAULT_BASE_URL = "https://matrixapii.com"', generate)
         self.assertIn('ALLOWED_BASE_HOST = "matrixapii.com"', generate)

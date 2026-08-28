@@ -120,6 +120,70 @@ class InputAspectRatioTests(unittest.TestCase):
 
 
 class ModelFailureDiagnosisTests(unittest.TestCase):
+    def test_pro_edit_blocks_implicit_local_processing(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "output_size": "2048x2048",
+                "crop": None,
+                "output_format": "same",
+                "output_quality": None,
+                "output_background": None,
+                "allow_pro_postprocess": False,
+            },
+        )()
+        with self.assertRaises(generate.ImageGenError) as raised:
+            generate.validate_pro_edit_processing("gpt-image-2-pro", "edit", True, args)
+        self.assertIn("不会扣费", str(raised.exception))
+
+    def test_pro_edit_allows_explicit_local_processing(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "output_size": "2048x2048",
+                "crop": None,
+                "output_format": "same",
+                "output_quality": None,
+                "output_background": None,
+                "allow_pro_postprocess": True,
+            },
+        )()
+        generate.validate_pro_edit_processing("gpt-image-2-pro", "edit", True, args)
+
+    def test_pro_edit_blocks_implicit_fixed_ratio(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "aspect_ratio": "3:2",
+                "output_size": None,
+                "crop": None,
+                "output_format": "same",
+                "output_quality": None,
+                "output_background": None,
+                "allow_pro_postprocess": False,
+            },
+        )()
+        with self.assertRaises(generate.ImageGenError):
+            generate.validate_pro_edit_processing("gpt-image-2-pro", "edit", True, args)
+
+    def test_4k_edit_is_not_changed_by_pro_guard(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "output_size": "2048x2048",
+                "crop": None,
+                "output_format": "same",
+                "output_quality": None,
+                "output_background": None,
+                "allow_pro_postprocess": False,
+            },
+        )()
+        generate.validate_pro_edit_processing("gpt-image-2", "edit", True, args)
+
     def test_gpt_image_mask_is_disabled_without_explicit_capability(self) -> None:
         with patch.dict("os.environ", {"IMAGEGEN_MASK_SUPPORT": "0"}):
             self.assertFalse(generate.mask_support_enabled("gpt-image-2-pro"))
