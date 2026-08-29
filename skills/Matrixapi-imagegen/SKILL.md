@@ -11,16 +11,16 @@ Generate or edit images with the bundled script and show the saved result to the
 
 1. Resolve `scripts/generate.py` relative to this `SKILL.md` file.
 2. Turn the user's request into a complete but concise image prompt, preferably below 900 characters. The pinned GPT Image 2 and GPT Image 2 Pro model limit is 1024 characters (characters, not tokens; Chinese characters count as one character). Preserve requested subject, composition, style, lighting, colors, text, and constraints. Do not invent identifying details. When the user supplies a local image, pass it as `--image` and treat it as the primary whole-scene reference. For ordinary edits, write the prompt to preserve the original composition and untouched areas, then require new content to match perspective, scale, light direction, color temperature, shadows, occlusion, depth of field, and texture; explicitly forbid pasted, sticker-like, cutout, or hard-edge results. For text edits, explicitly erase every old glyph, stroke, shadow, outline, ghosting, and leftover mark in the target area before typesetting only the exact new text; do not add, omit, rewrite, or leave old text. Do not add `--mask` unless the user explicitly requests precise masked editing and the configured model channel is confirmed to support it. The script automatically compacts an overlong prompt to the 1024-character limit before submitting it, so do not manually retry after a local length error. On Windows, when the prompt contains quotes, apostrophes, newlines, or is long, pass it through `--prompt-file <UTF-8 file>` instead of embedding it in a PowerShell command; this prevents local shell parsing errors and does not add an API request.
-3. Choose the requested size. Use the current channel's lowest supported tier by default (`1K` where that is the channel minimum); only use `2K`/`4K` when the customer explicitly requests it and the selected channel supports it. Do not run or narrate a separate size or aspect-ratio preflight. Preserve an explicitly requested aspect ratio (including `16:9`, `21:9`, or any other positive-integer ratio) and pass it to the configured upstream unchanged. For local edits without an explicit ratio, pass `--aspect-ratio auto` so the source geometry is preserved before the only paid submission. Never replace a source ratio with the nearest enum, never force `1:1`, `3:2`, or `2:3`, and never turn an edit into a square request. If the upstream rejects the requested tier or geometry, report that error once; do not silently change the ratio or resubmit. If billing or final state is unknown, query/idempotency-guard the original task and do not submit again. Do not crop, stretch, recomposite, or locally redraw the image.
-   If the user asks for an arbitrary final pixel size, pass the requested geometry upstream when the channel supports it. Do not add `--output-size` automatically to an edit; use it only when the customer explicitly requests local post-processing. Otherwise return the upstream image at its native returned geometry.
+3. Choose the requested size. All supported upstreams use `1K` as the lowest tier; use `1K` by default unless the customer explicitly requests `2K`/`4K`. Do not run or narrate a separate size or ratio preflight. Preserve an explicitly requested aspect ratio (including `16:9` or any other positive-integer ratio) and pass it to the configured upstream unchanged; do not replace it with `1:1`, `3:2`, or `2:3`, and do not turn an edit into a square request. `auto` means the upstream/model default when the customer did not specify a ratio. Never submit a failing request followed by a second request with a changed ratio or size. If billing or final state is unknown, query/idempotency-guard the original task and do not submit again. Do not crop, stretch, recomposite, or locally redraw the image.
+   If the user asks for an arbitrary final pixel size (for example `1179x2556` or `1920x1080`), pass the requested geometry to the upstream when the selected channel supports it; do not silently crop or substitute a different ratio. Use `--output-size` only when the customer explicitly requests local deterministic post-processing. When `--output-size` is present with `--aspect-ratio auto`, its ratio takes precedence over input-image inference.
 4. Choose quality from `auto`, `low`, `medium`, and `high`. Map "草稿/快速预览" to `low`, "标准" to `medium`, "最终/细节丰富" to `high`, and omit a preference or use `auto` when the model should decide. The model price is per request; quality changes latency/detail rather than the configured per-request price.
-5. Choose the request mode automatically: no reference image uses `/v1/images/generations`; local `--image` files use the relay's multipart `/v1/images/edits`; public `--reference-url` values use the GPT Image JSON `images` array on `/v1/images/generations`. On the pinned relay, local GPT Image 2 files are staged as short-lived reusable HTTPS URLs and forwarded through the documented JSON `images` flow when the model service does not accept inbound multipart media. The URL remains available during async validation and processing, then expires automatically. Up to 16 references are accepted for the pinned GPT Image 2 model. Do not mix local files and URL references in one request. For this relay, local `mask` is disabled by default for `gpt-image-2` and `gemini-3-pro-image`; the script rejects it locally before upload so a known-unsupported request cannot fail after billing. Do not treat a mask as an ordinary reference image.
+5. Choose the request mode automatically: no reference image uses `/v1/images/generations`; local `--image` files use the relay's multipart `/v1/images/edits`; public `--reference-url` values use the GPT Image JSON `images` array on `/v1/images/generations`. On the pinned relay, local GPT Image 2 files are staged as short-lived reusable HTTPS URLs and forwarded through the documented JSON `images` flow when the model service does not accept inbound multipart media. The URL remains available during async validation and processing, then expires automatically. Up to 16 references are accepted for the pinned GPT Image 2 model. Do not mix local files and URL references in one request. For this relay, local `mask` is disabled by default for `gpt-image-2`; the script rejects it locally before upload so a known-unsupported request cannot fail after billing. Do not treat a mask as an ordinary reference image. The VPS identifies its selected route internally; for its Yaliai routes, it packs local multipart references only when the six-image/12 MiB-per-file/30 MiB-total limits require it and sends the resulting <=6 uncropped grids in one request. Other providers remain unchanged.
    When the user says "edit the image above", "edit the previous image", or "edit the image just generated", reuse only the exact prior `download_files` or `files` path returned by the immediately preceding successful command in this same conversation and pass it as `--image`. Never scan an output, temporary, clipboard, download, or generated-images directory to guess the prior image. Never silently change an edit request into a new generation: if that exact path is unavailable in the conversation, report the missing path and stop. When the user instead asks to generate a new/different image, omit `--image` and `--reference-url`; the earlier editable image must not affect the new generation.
-6. `gpt-image-2` and `gemini-3-pro-image` are the supported model names shown by the Skill's configuration and update checks; the default remains `gpt-image-2`. URL-reference edits preserve native `1K/2K/4K` sizing. Local GPT Image 2 edits on the pinned relay also preserve the requested native size through its temporary URL conversion. Other relays may still require a public reference URL or an enabled multipart upload capability. Set `IMAGEGEN_LEGACY_EDIT_RESIZE=1` only when an older relay rejects high-resolution edits; this intentionally changes the output size and is reported in the JSON result. The JSON result includes `aspect_ratio_source` (`input_image`, `output_size`, `user`, or `model_default`) so the selected ratio is visible.
+6. `gpt-image-2` and `gemini-3-pro-image` are the supported model names shown by the Skill's configuration and update checks; the default remains `gpt-image-2`. Local GPT Image 2 edits on the pinned relay preserve the requested native size through temporary URL conversion. Other relays may require a public reference URL or an enabled multipart capability. Set `IMAGEGEN_LEGACY_EDIT_RESIZE=1` only when an older relay rejects high-resolution edits; this intentionally changes the working size and is reported in the JSON result. The JSON result includes `aspect_ratio_source` (`input_image`, `output_size`, `user`, or `model_default`) so the selected ratio is visible.
 7. Run a generation:
 
    ```text
-   python <skill-directory>/scripts/generate.py --task-id "task-<fresh-unique-id>" --model gpt-image-2 --prompt "<prompt>" --size 4K --aspect-ratio auto --quality high
+   python <skill-directory>/scripts/generate.py --task-id "task-<fresh-unique-id>" --model gpt-image-2 --prompt "<prompt>" --size 4K --aspect-ratio 2:3 --quality high
    ```
 
    For an edit with an original image:
@@ -43,7 +43,16 @@ Generate or edit images with the bundled script and show the saved result to the
    Page 1 uses the complete original reference set. The script persists the story request and continuity state; page 2 uses only page 1's original output, page 3 uses only page 2, and later pages continue the same way. After each success, immediately render that page from `preview_files` and its original link from `download_files` before doing anything else. If `story.status` is `active`, invoke the same script again using exactly the ordered strings in `story.next_arguments`; do not rewrite the prompt, select a reference yourself, scan a directory, or add another option. If a page fails, stop: the state deliberately supplies no next command and the failed page cannot be submitted again automatically. Never use `--n` to represent story pages because variants do not provide sequential continuity.
 8. Apply local deterministic post-processing only when the user requests a final size, crop, output format, compression, or derived variants. The local stage may resize, crop, fit to a canvas, convert PNG/JPEG/WebP/AVIF, compress, and write a manifest; it must not install or invoke a local ML model. Use `--output-size`, `--fit cover|contain|fill|inside|outside`, `--position`, `--crop`, `--output-format`, `--output-quality`, and `--output-background` as needed. Preserve the unmodified model result in `original_files` for future edits, and use `processed_files` for the requested deliverable. For an existing image with no API request, use `--process-only --image <path>` with the same local options.
    For any edit request whose intent is “只改文字/细节，其他保持原样”, do not add any local post-processing option and do not add an upstream ratio. The script rejects accidental `output-size`, `cover`, `fill`, `crop`, format, or non-`auto` ratio arguments before the paid request unless the caller explicitly supplies `--allow-postprocess` or `--allow-edit-geometry`. A successful edit is final: render its `preview_files` immediately and never run a second command to inspect, correct, or recomposite it.
-9. Parse only the JSON written to stdout by the current command. Accept it only when `ok` is true, its `task_id` exactly equals the command's `--task-id`, `result_match.task_id` matches it, and `completed_at_ms` is not earlier than `request_started_at_ms`. Use its `preview_files` immediately; do not open or scan the output directory, search for a newer file, reread the result JSON with another shell command, inspect dimensions, or run another verification command. The script atomically writes that same task-scoped JSON and, on Windows, schedules it to become hidden after stdout has been delivered; this background hide does not delay command completion. For each output, render both the inline preview and a clickable original-image link, using the normalized absolute paths from `preview_files` and `download_files`:
+
+   Ordinary first-image edits follow the same path as before. When the customer
+   uploads one image and asks to replace a detail (for example, change the
+   character's head while keeping the rest unchanged), pass that original file
+   as the primary `--image` reference and send one upstream edit request. Do
+   not convert it into a new generation, do not reuse a previous result, do not
+   force a square/3:2 canvas, and do not perform local redraw or post-processing.
+   Only an explicit request for a new variant may use `--force-new`; the normal
+   edit must preserve the upstream-returned image and dimensions.
+9. Parse only the JSON written to stdout by the current command. Accept it only when `ok` is true, its `task_id` exactly equals the command's `--task-id`, `result_match.task_id` matches it, and `completed_at_ms` is not earlier than `request_started_at_ms`. Use its `preview_files` immediately; do not open or scan the output directory, search for a newer file, reread the result JSON with another shell command, inspect dimensions, or run another verification command. The script atomically writes that same task-scoped JSON and, on Windows, schedules it to become hidden after stdout has been delivered; this background hide does not delay command completion. Once a successful result is received, end the image-generation action immediately: do not call `/v1/responses` again, do not send the same prompt or images again, and do not invoke any extra image/view/verification command. The final response must render the returned `preview_files` and link `download_files` directly. For each output, render both the inline preview and a clickable original-image link, using the normalized absolute paths from `preview_files` and `download_files`:
    `![generated image](C:/.../image.png)`
    `[点击打开或下载原图](C:/.../image.png)`
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
@@ -113,7 +122,7 @@ The script discovers credentials in this order:
 2. `OPENAI_API_KEY` and `OPENAI_BASE_URL`, only when the URL is the pinned relay.
 3. The current Codex provider selected in CC Switch, only when it points to the pinned relay.
 
-The pinned relay must implement `POST /v1/images/generations` for JSON generation, URL-reference editing, async tasks, and SSE; it should also keep `POST /v1/images/edits` with multipart `image`/optional `mask` fields for local-file compatibility. For GPT Image 2 models, the pinned relay can convert local image parts to short-lived reusable URLs before calling the model JSON endpoint. Local mask editing is disabled by default for the pinned GPT Image 2 channels because their documented interface does not guarantee `mask`. Only after the relay confirms support may `IMAGEGEN_MASK_SUPPORT=1` be set for a request. Responses may return either `data[].url` or `data[].b64_json`. The supported model names are `gpt-image-2` and `gemini-3-pro-image`; the default model is `gpt-image-2`.
+The pinned relay must implement `POST /v1/images/generations` for JSON generation, URL-reference editing, async tasks, and SSE; it should also keep `POST /v1/images/edits` with multipart `image`/optional `mask` fields for local-file compatibility. For GPT Image 2 models, the pinned relay can convert local image parts to short-lived reusable URLs before calling the model JSON endpoint. Local mask editing is disabled by default for the pinned GPT Image 2 channel because its documented interface does not guarantee `mask`. Only after the relay confirms support may `IMAGEGEN_MASK_SUPPORT=1` be set for a request. Responses may return either `data[].url` or `data[].b64_json`. The supported model names are `gpt-image-2` and `gemini-3-pro-image`; the default model is `gpt-image-2`.
 
 For native GPT Image 2 4K editing, leave `IMAGEGEN_LEGACY_EDIT_RESIZE` unset. Set it to `1` only for a relay that cannot accept native 4K multipart edits; this intentionally changes the working size and is reported in the JSON result.
 
@@ -127,14 +136,41 @@ The check reports only whether a supported configuration was found, its generic 
 
 ## Updating
 
-### Duplicate-charge protection
+### Internal files and prompt-file handling
+
+The `.idempotency` ledger is required for duplicate-charge protection. Keep it
+in the output directory, mark the directory hidden on Windows, and never show
+its filenames or contents in the Codex response. Do not delete it merely to
+make a new generation; use a fresh task and `--force-new` when the customer
+explicitly requests a new variant.
+
+When a long or quoted prompt is supplied through `--prompt-file`, use a
+short-lived file in the system temporary directory rather than the project
+working directory. The script accepts UTF-8, UTF-8 BOM, and UTF-16 LE/BE and
+reads the text once before the paid request. Do not expose the temporary
+filename in the response; the caller may remove its own temporary file after
+the command returns.
+
+### Duplicate-charge protection and new generations
+
+The local idempotency record protects a *single task handoff* from being
+submitted twice. It is not a decision that a customer asking for a new image
+should receive an old image. When the user says “再生成/重新出图/换一张/再来
+一张” (or otherwise asks for a new variant), always create a fresh task and pass
+`--force-new`; this is an intentional new paid request, not a transport retry.
+The response must tell the user that a new upstream charge may occur.
+
+Reuse a cached `preview_files` result only when the user asks to recover the
+same task/result (for example, “返回刚才那张”) or when Codex is resuming the
+same interrupted handoff. If a prior request was submitted but its final state
+is unknown, block the identical retry and ask for confirmation before using
+`--force-new`. Never silently treat “再生成” as a cached-result lookup.
 
 Each API request is keyed by a deterministic fingerprint containing the current
 Codex thread, prompt, model, mode, size, quality, count, and the ordered
-reference-image content. A completed identical request is returned from its
-local result record without another API call. If a prior request was submitted
-but its final state is unknown, the identical request is blocked to prevent a
-second charge. Only an explicit `--force-new` retry can override that guard.
+reference-image content. The script's existing idempotency record and lock are
+still required for crash/retry protection; only the user-intent routing above
+decides whether a fresh task is allowed.
 
 When the user explicitly asks to update Matrixapi-imagegen, run exactly once:
 
