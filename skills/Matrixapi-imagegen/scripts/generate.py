@@ -27,11 +27,16 @@ try:
 except ImportError:  # pragma: no cover - allows importing this file as a module
     from .postprocess import PostprocessError, parse_output_size, process_many
 
+try:
+    from reference_pack import ReferencePackError, pack_yaliai_references
+except ImportError:  # pragma: no cover - allows importing this file as a module
+    from .reference_pack import ReferencePackError, pack_yaliai_references
+
 
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.20"
+SKILL_VERSION = "1.8.26"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -45,6 +50,8 @@ MAX_EDGE = 3840
 MIN_PIXELS = 655_360
 MAX_PIXELS = 14_745_600
 MAX_INPUT_IMAGES = 16
+MAX_YALIAI_SOURCE_IMAGES = 60
+YALIAI_PROVIDER = "yaliai"
 # A large local edit is more reliable as a JSON async task. The relay stages
 # local files as temporary HTTPS references before submitting upstream, so
 # this changes only the response transport, never the source pixels or size.
@@ -61,8 +68,8 @@ IDEMPOTENCY_WAIT_INTERVAL_SECONDS = 0.2
 # opt into the legacy downscale through IMAGEGEN_LEGACY_EDIT_RESIZE.
 EDIT_MAX_EDGE = 1792
 QUALITY_VALUES = {"auto", "low", "medium", "high"}
-# ``auto`` lets the model choose. Explicit positive-integer ratios are passed
-# through to the configured relay instead of being limited to a fixed enum.
+# ``auto`` lets the model choose.  Explicit ratios are passed through to the
+# configured relay instead of being limited to the old 1:1/3:2/2:3 enum.
 ASPECT_RATIOS = {"auto", "1:1", "3:2", "2:3"}
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 MASK_SUPPORT_ENV = "IMAGEGEN_MASK_SUPPORT"
@@ -235,11 +242,77 @@ def _skill_env_file_values() -> dict[str, str]:
     return values
 
 
+def _read_prompt_file(path: Path) -> str:
+    """Read prompt text without assuming the shell's Windows encoding.
+
+    Prompt files may come from PowerShell, Notepad, or Codex and therefore be
+    UTF-8, UTF-8 with BOM, or UTF-16 LE/BE.  Detect the BOM first, then use
+    strict UTF-8 and a final UTF-16 fallback so malformed input is rejected
+    before any paid request is made.
+    """
+    try:
+        data = path.expanduser().read_bytes()
+    except OSError as exc:
+        raise ImageGenError(f"Unable to read --prompt-file: {exc}") from exc
+    if data.startswith(b"\xff\xfe"):
+        encoding = "utf-16-le"
+    elif data.startswith(b"\xfe\xff"):
+        encoding = "utf-16-be"
+    elif data.startswith(b"\xef\xbb\xbf"):
+        encoding = "utf-8-sig"
+    else:
+        encoding = "utf-8"
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError:
+        if encoding == "utf-8":
+            try:
+                return data.decode("utf-16")
+            except UnicodeDecodeError as exc:
+                raise ImageGenError(
+                    "Unable to decode --prompt-file; use UTF-8 or UTF-16 LE/BE"
+                ) from exc
+        raise ImageGenError(
+            "Unable to decode --prompt-file; use UTF-8 or UTF-16 LE/BE"
+        )
+
+
+def _hide_directory(path: Path) -> None:
+    """Mark an internal state directory hidden on Windows immediately."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        FILE_ATTRIBUTE_HIDDEN = 0x2
+        INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+        kernel32 = ctypes.windll.kernel32
+        get_attributes = kernel32.GetFileAttributesW
+        set_attributes = kernel32.SetFileAttributesW
+        get_attributes.argtypes = [ctypes.c_wchar_p]
+        get_attributes.restype = ctypes.c_uint32
+        set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        set_attributes.restype = ctypes.c_int
+        attributes = get_attributes(str(path))
+        if attributes != INVALID_FILE_ATTRIBUTES:
+            set_attributes(str(path), attributes | FILE_ATTRIBUTE_HIDDEN)
+    except (AttributeError, OSError):
+        pass
+
+
 def mask_support_enabled(model: str) -> bool:
     """Return whether a model's local mask path was explicitly enabled."""
-    if model not in {"gpt-image-2", "gemini-3-pro-image"}:
+    if model not in {"gpt-image-2"}:
         return True
     return _environment_value(MASK_SUPPORT_ENV).lower() in {"1", "true", "yes"}
+
+
+def selected_provider(value: str | None) -> str:
+    """Return an explicit provider adapter; auto leaves all existing paths unchanged."""
+    provider = (value or _environment_value("IMAGEGEN_PROVIDER") or "auto").strip().lower()
+    if provider not in {"auto", YALIAI_PROVIDER}:
+        raise ImageGenError("--provider must be auto or yaliai")
+    return provider
 
 
 def _user_environment_value(name: str) -> str:
@@ -564,16 +637,6 @@ def image_dimensions(path_value: str, label: str = "Input image") -> tuple[int, 
     return _dimensions_from_image_bytes(data, mime, label)
 
 
-def infer_image_aspect_ratio(image_paths: list[str]) -> str:
-    """Choose the closest supported model ratio from the first input image."""
-    if not image_paths:
-        raise ImageGenError("无法从空的输入图片列表推断比例")
-    width, height = image_dimensions(image_paths[0])
-    actual = width / height
-    candidates = {"1:1": 1.0, "3:2": 1.5, "2:3": 2 / 3}
-    return min(candidates, key=lambda ratio: abs(actual - candidates[ratio]))
-
-
 def resolve_aspect_ratio(aspect_ratio: str, image_paths: list[str] | None = None) -> tuple[str, str]:
     """Resolve an explicit ratio without forcing a local edit into a crop."""
     normalized = validate_aspect_ratio(aspect_ratio)
@@ -626,7 +689,7 @@ def source_preserving_edit_size(size: str, image_paths: list[str]) -> str:
 
 def edit_working_size(size: str, model: str) -> str:
     """Return the edit size, preserving native GPT Image 2 tiers by default."""
-    if model in {"gpt-image-2", "gemini-3-pro-image"} and not _environment_value(
+    if model in {"gpt-image-2"} and not _environment_value(
         "IMAGEGEN_LEGACY_EDIT_RESIZE"
     ).lower() in {"1", "true", "yes"}:
         return size
@@ -668,16 +731,9 @@ def validate_edit_delivery_options(
     args: argparse.Namespace,
     story_begun: bool,
 ) -> None:
-    """Block Codex-added geometry/post-processing before any paid edit request."""
+    """Block only explicitly requested local post-processing before an edit."""
     if mode != "edit" or story_begun:
         return
-    if args.allow_edit_geometry:
-        return
-    if aspect_ratio != "auto":
-        raise ImageGenError(
-            "编辑请求默认保持输入图片比例；本次未发送请求，也不会扣费。"
-            "如客户明确要求改变上游比例，请显式使用 --allow-edit-geometry。"
-        )
     if local_postprocess_requested(args) and not args.allow_postprocess:
         raise ImageGenError(
             "编辑请求默认直接交付上游原图；本次未发送请求，也不会扣费。"
@@ -710,7 +766,7 @@ def should_auto_async_local_edit(
     has_mask: bool,
 ) -> bool:
     """Select async only for local GPT Image 2 edits likely to outlive sync."""
-    if model not in {"gpt-image-2", "gemini-3-pro-image"} or has_mask:
+    if model not in SUPPORTED_MODELS or has_mask:
         return False
     width, height = (int(value) for value in size.split("x"))
     if max(width, height) <= EDIT_MAX_EDGE:
@@ -899,14 +955,9 @@ def wait_for_task(
 ) -> dict[str, Any]:
     if result.get("data"):
         return result
-    task_id = extract_async_task_id(result)
+    task_id = str(result.get("id") or result.get("task_id") or "").strip()
     if not task_id:
-        fields = ", ".join(sorted(str(k) for k in result.keys()))
-        raise ImageGenError(
-            "Async image API response did not include a task id; "
-            f"response fields: {fields or '(none)'}. "
-            "The request will not be resubmitted to avoid duplicate billing."
-        )
+        raise ImageGenError("Async image API response did not include a task id")
     deadline = time.monotonic() + timeout
     status_url = _status_endpoint(endpoint, task_id)
     latest = result
@@ -928,39 +979,6 @@ def wait_for_task(
         # keeping a single status request in flight.
         time.sleep(1)
     raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
-
-
-def extract_async_task_id(result: Any) -> str:
-    """Extract task identifiers used by compatible async image relays.
-
-    Relays differ in casing and nesting (``taskId``, ``task_id``, or
-    ``task: {id: ...}``).  Only task-shaped fields are searched recursively;
-    arbitrary nested image IDs are not treated as task IDs.
-    """
-    if not isinstance(result, dict):
-        return ""
-    for key in ("task_id", "taskId", "taskID"):
-        value = result.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    task = result.get("task")
-    if isinstance(task, str) and task.strip():
-        return task.strip()
-    if isinstance(task, dict):
-        nested = extract_async_task_id(task)
-        if nested:
-            return nested
-        value = task.get("id")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    for key in ("data", "result", "response"):
-        value = result.get(key)
-        if isinstance(value, dict):
-            nested = extract_async_task_id(value)
-            if nested:
-                return nested
-    value = result.get("id")
-    return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
 def _safe_filename(path: Path) -> str:
@@ -1093,7 +1111,7 @@ def call_edit_api(
     # parameter. A single edit is the normal skill path, so omit n=1 even
     # before the relay's multipart-to-JSON conversion. Other image models keep
     # the legacy multipart count behavior for compatibility.
-    if count != 1 and model not in {"gpt-image-2", "gemini-3-pro-image"}:
+    if count != 1 and model not in {"gpt-image-2"}:
         fields.append(("n", str(count)))
     if options:
         fields.extend(options.items())
@@ -1319,6 +1337,10 @@ def claim_idempotency(
     record_path = idempotency_record_path(output_dir, fingerprint)
     lock_path = record_path.with_suffix(".lock")
     record_path.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the deduplication ledger available to the script while hiding it
+    # from ordinary Explorer/Codex views.  The files themselves are retained
+    # because removing them would re-enable duplicate paid submissions.
+    _hide_directory(record_path.parent)
     deadline = time.monotonic() + timeout
     while True:
         now_ms = time.time_ns() // 1_000_000
@@ -1769,6 +1791,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", help="Model id; defaults to IMAGEGEN_MODEL or gpt-image-2")
     parser.add_argument(
+        "--provider",
+        choices=("auto", "yaliai"),
+        default=None,
+        help="Optional provider adapter; use yaliai only when the VPS selected the Yali upstream",
+    )
+    parser.add_argument(
         "--image",
         "--reference-image",
         dest="images",
@@ -1798,7 +1826,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--aspect-ratio",
         default="auto",
-        help="Upstream aspect ratio for JSON generation/edit requests; explicit positive-integer ratios are passed through",
+        help="Upstream aspect ratio for JSON generation/edit requests; explicit ratios are passed through",
     )
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality", choices=sorted(QUALITY_VALUES), default="auto")
@@ -1919,9 +1947,9 @@ def main() -> int:
         return 2
     if args.prompt_file is not None:
         try:
-            args.prompt = args.prompt_file.expanduser().read_text(encoding="utf-8")
-        except OSError as exc:
-            print(f"Unable to read --prompt-file: {exc}", file=sys.stderr)
+            args.prompt = _read_prompt_file(args.prompt_file)
+        except ImageGenError as exc:
+            print(str(exc), file=sys.stderr)
             return 2
     request_started_at_ms = time.time_ns() // 1_000_000
     task_id: str | None = None
@@ -1930,6 +1958,7 @@ def main() -> int:
     story_begun = False
     story_root_prompt: str | None = None
     story_page: int | None = None
+    provider = "auto"
     idempotency_fingerprint: str | None = None
     idempotency_record: Path | None = None
     idempotency_lock: Path | None = None
@@ -1941,6 +1970,7 @@ def main() -> int:
             raise ImageGenError("Timeout must be between 10 and 600 seconds")
         if args.output_quality is not None and not 1 <= args.output_quality <= 100:
             raise ImageGenError("--output-quality must be between 1 and 100")
+        provider = selected_provider(args.provider)
         if args.story_pages is not None and args.story_next is not None:
             raise ImageGenError("Use --story-pages or --story-next, not both")
         if args.story_pages is not None:
@@ -2136,7 +2166,13 @@ def main() -> int:
                 "请移除 --mask，使用整图参考编辑，并在提示词中说明需要修改的区域。"
                 f"仅当中转站确认该模型支持 mask 后，才可设置 {MASK_SUPPORT_ENV}=1。"
             )
-        if len(image_paths) + len(reference_urls) > MAX_INPUT_IMAGES:
+        reference_count = len(image_paths) + len(reference_urls)
+        if provider == YALIAI_PROVIDER and reference_count > MAX_YALIAI_SOURCE_IMAGES:
+            raise ImageGenError(
+                f"亚立适配最多处理 {MAX_YALIAI_SOURCE_IMAGES} 张原始参考图；"
+                "请减少数量后再提交，本次未发送，也不会扣费。"
+            )
+        if provider != YALIAI_PROVIDER and reference_count > MAX_INPUT_IMAGES:
             raise ImageGenError(f"At most {MAX_INPUT_IMAGES} reference images are supported")
         if args.webhook and not args.async_mode:
             raise ImageGenError("--webhook requires --async")
@@ -2164,8 +2200,17 @@ def main() -> int:
             )
         edit_input_size = None
         input_bytes = None
+        request_image_paths = list(image_paths)
+        reference_pack = {"enabled": False, "packed": False}
         if image_paths:
             input_bytes = _input_image_bytes(image_paths, args.mask)
+            if provider == YALIAI_PROVIDER:
+                try:
+                    request_image_paths, reference_pack = pack_yaliai_references(
+                        image_paths, output_dir
+                    )
+                except ReferencePackError as exc:
+                    raise ImageGenError(str(exc)) from exc
             if aspect_ratio == "auto":
                 edit_input_size = source_preserving_edit_size(
                     requested_size, image_paths
@@ -2206,6 +2251,7 @@ def main() -> int:
                 "base_url": base_url,
                 "mode": mode,
                 "model": model,
+                "provider": provider,
                 "prompt": prompt,
                 "size": size,
                 "requested_size": requested_size,
@@ -2222,6 +2268,7 @@ def main() -> int:
                 "local_references": _local_reference_fingerprint(
                     image_paths, args.mask
                 ),
+                "reference_pack": reference_pack,
                 "story_pages": args.story_pages,
                 "story_page": story_page,
                 "story_next": story_path.as_posix() if story_path else "",
@@ -2299,7 +2346,7 @@ def main() -> int:
                 prompt,
                 size,
                 args.n,
-                image_paths,
+                request_image_paths,
                 args.mask,
                 args.timeout,
                 options,
@@ -2390,6 +2437,7 @@ def main() -> int:
             "version": SKILL_VERSION,
             "mode": mode,
             "model": model,
+            "provider": provider,
             "count": len(files),
             "prompt_limit": PROMPT_MAX_CHARS,
             "prompt_compacted": prompt_compacted,
@@ -2409,7 +2457,9 @@ def main() -> int:
             "async_fallback": async_fallback,
             "stream": args.stream,
             "input_images": len(image_paths) + len(reference_urls),
+            "request_input_images": len(request_image_paths) + len(reference_urls),
             "input_bytes": input_bytes,
+            "reference_pack": reference_pack,
             "mask": bool(args.mask),
             "files": files,
             "original_files": original_files,
