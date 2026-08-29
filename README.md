@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.23**
+Current release: **v1.8.26**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.23](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.23.zip)
+[下载 Matrixapi-imagegen v1.8.26](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.26.zip)
 
 解压后按系统运行安装程序：
 
@@ -19,7 +19,7 @@ Current release: **v1.8.23**
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
-本版本以 v1.8.19 为基线，保留异步任务编号兼容和防重复计费保护，并合并 v1.8.18 的比例透传修复。客户明确指定的比例（包括 `16:9`、`21:9` 等正整数比例）原样发送给上游；编辑默认保持输入图片比例，不做比例预检、自动替换、裁剪、本地重绘或二次提交。未指定比例时使用模型默认值，普通生成和渠道配置不变。
+本版本不做比例预检或自动改比例。客户明确指定的比例（包括 `16:9`）原样发送给上游；不会因比例判断而二次提交、裁剪或本地重绘。未指定比例时才使用模型默认值，普通生成和渠道配置不变。
 
 安装位置：
 
@@ -103,6 +103,12 @@ full resolution. Large local edits (6 or more references, or at least 48 MiB
 of source files) use the relay's asynchronous task endpoint automatically and
 poll for the result, so a long synchronous connection cannot be lost after the
 upstream has completed. It never retries a billed task automatically.
+
+The VPS determines the selected image route internally. For its Yaliai routes,
+it accepts up to six forwarded images, 12 MiB per image, and 30 MiB total; when
+needed, the VPS creates deterministic, uncropped JPEG contact sheets with up
+to six source images each and still makes one upstream request. Other providers
+remain on the original reference path and are never packed.
 
 ## Fast sequential comics
 
@@ -197,4 +203,3 @@ python skills/Matrixapi-imagegen/scripts/generate.py --task-id task-example-0002
 ```
 
 Never commit API keys or other credentials to this repository.
-
