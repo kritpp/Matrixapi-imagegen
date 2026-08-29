@@ -43,7 +43,7 @@ REQUIRED_FILES = (
 )
 FIXED_BASE_URL = "https://matrixapii.com"
 FIXED_BASE_HOST = "matrixapii.com"
-SUPPORTED_MODELS = ("gpt-image-2", "gpt-image-2-pro")
+SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 
 
 class UpdateError(RuntimeError):

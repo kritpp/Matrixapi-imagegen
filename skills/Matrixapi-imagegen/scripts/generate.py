@@ -29,8 +29,9 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 
 
 DEFAULT_MODEL = "gpt-image-2"
+SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.19"
+SKILL_VERSION = "1.8.20"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -60,6 +61,8 @@ IDEMPOTENCY_WAIT_INTERVAL_SECONDS = 0.2
 # opt into the legacy downscale through IMAGEGEN_LEGACY_EDIT_RESIZE.
 EDIT_MAX_EDGE = 1792
 QUALITY_VALUES = {"auto", "low", "medium", "high"}
+# ``auto`` lets the model choose. Explicit positive-integer ratios are passed
+# through to the configured relay instead of being limited to a fixed enum.
 ASPECT_RATIOS = {"auto", "1:1", "3:2", "2:3"}
 SUPPORTED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp", "image/gif"}
 MASK_SUPPORT_ENV = "IMAGEGEN_MASK_SUPPORT"
@@ -234,7 +237,7 @@ def _skill_env_file_values() -> dict[str, str]:
 
 def mask_support_enabled(model: str) -> bool:
     """Return whether a model's local mask path was explicitly enabled."""
-    if model not in {"gpt-image-2", "gpt-image-2-pro"}:
+    if model not in {"gpt-image-2", "gemini-3-pro-image"}:
         return True
     return _environment_value(MASK_SUPPORT_ENV).lower() in {"1", "true", "yes"}
 
@@ -452,7 +455,20 @@ def legacy_pixel_size(size: str, aspect_ratio: str) -> str:
         "2K": {"auto": "2048x2048", "1:1": "2048x2048", "3:2": "2048x1360", "2:3": "1360x2048"},
         "4K": {"auto": "3840x2160", "1:1": "3840x3840", "3:2": "3840x2560", "2:3": "2560x3840"},
     }
-    return validate_size(dimensions[size][aspect_ratio])
+    if aspect_ratio in dimensions[size]:
+        return validate_size(dimensions[size][aspect_ratio])
+    match = re.fullmatch(r"([1-9]\d*):([1-9]\d*)", aspect_ratio)
+    if not match:
+        raise ImageGenError("Aspect ratio must use positive integers separated by ':'")
+    ratio_width, ratio_height = int(match.group(1)), int(match.group(2))
+    long_edge = {"1K": 1024, "2K": 2048, "4K": 3840}[size]
+    if ratio_width >= ratio_height:
+        width = long_edge
+        height = max(16, int(round(long_edge * ratio_height / ratio_width / 16)) * 16)
+    else:
+        height = long_edge
+        width = max(16, int(round(long_edge * ratio_width / ratio_height / 16)) * 16)
+    return validate_size(f"{width}x{height}")
 
 
 def validate_quality(quality: str) -> str:
@@ -465,9 +481,10 @@ def validate_quality(quality: str) -> str:
 
 def validate_aspect_ratio(aspect_ratio: str) -> str:
     normalized = aspect_ratio.strip().lower()
-    if normalized not in ASPECT_RATIOS:
-        choices = ", ".join(sorted(ASPECT_RATIOS))
-        raise ImageGenError(f"Aspect ratio must be one of: {choices}")
+    if normalized in ASPECT_RATIOS:
+        return normalized
+    if not re.fullmatch(r"[1-9]\d*:[1-9]\d*", normalized):
+        raise ImageGenError("Aspect ratio must use positive integers separated by ':'")
     return normalized
 
 
@@ -609,7 +626,7 @@ def source_preserving_edit_size(size: str, image_paths: list[str]) -> str:
 
 def edit_working_size(size: str, model: str) -> str:
     """Return the edit size, preserving native GPT Image 2 tiers by default."""
-    if model in {"gpt-image-2", "gpt-image-2-pro"} and not _environment_value(
+    if model in {"gpt-image-2", "gemini-3-pro-image"} and not _environment_value(
         "IMAGEGEN_LEGACY_EDIT_RESIZE"
     ).lower() in {"1", "true", "yes"}:
         return size
@@ -676,7 +693,7 @@ def validate_pro_edit_processing(
     args: argparse.Namespace,
 ) -> None:
     """Backward-compatible helper retained for callers of the 1.8.13 test API."""
-    if model != "gpt-image-2-pro" or mode != "edit" or not has_reference:
+    if model != "gemini-3-pro-image" or mode != "edit" or not has_reference:
         return
     geometry_requested = getattr(args, "aspect_ratio", "auto") != "auto" or local_postprocess_requested(args)
     if geometry_requested and not getattr(args, "allow_pro_postprocess", False):
@@ -693,7 +710,7 @@ def should_auto_async_local_edit(
     has_mask: bool,
 ) -> bool:
     """Select async only for local GPT Image 2 edits likely to outlive sync."""
-    if model not in {"gpt-image-2", "gpt-image-2-pro"} or has_mask:
+    if model not in {"gpt-image-2", "gemini-3-pro-image"} or has_mask:
         return False
     width, height = (int(value) for value in size.split("x"))
     if max(width, height) <= EDIT_MAX_EDGE:
@@ -1076,7 +1093,7 @@ def call_edit_api(
     # parameter. A single edit is the normal skill path, so omit n=1 even
     # before the relay's multipart-to-JSON conversion. Other image models keep
     # the legacy multipart count behavior for compatibility.
-    if count != 1 and model not in {"gpt-image-2", "gpt-image-2-pro"}:
+    if count != 1 and model not in {"gpt-image-2", "gemini-3-pro-image"}:
         fields.append(("n", str(count)))
     if options:
         fields.extend(options.items())
@@ -1781,8 +1798,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--aspect-ratio",
         default="auto",
-        choices=sorted(ASPECT_RATIOS),
-        help="Upstream aspect ratio for JSON generation/edit requests",
+        help="Upstream aspect ratio for JSON generation/edit requests; explicit positive-integer ratios are passed through",
     )
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality", choices=sorted(QUALITY_VALUES), default="auto")
@@ -2043,7 +2059,7 @@ def main() -> int:
                         "version": SKILL_VERSION,
                         "credential_source": source,
                         "model": model,
-                        "supported_models": ["gpt-image-2", "gpt-image-2-pro"],
+                        "supported_models": list(SUPPORTED_MODELS),
                         "prompt_limit": PROMPT_MAX_CHARS,
                         "supported_modes": [
                             "generate",
@@ -2135,7 +2151,7 @@ def main() -> int:
             metadata = None
         if image_paths and (args.stream or args.async_mode) and model not in {
             "gpt-image-2",
-            "gpt-image-2-pro",
+            "gemini-3-pro-image",
         }:
             raise ImageGenError(
                 "This relay only supports --stream/--async for local GPT Image 2 edits"
