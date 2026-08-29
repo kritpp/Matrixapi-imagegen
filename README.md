@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.20**
+Current release: **v1.8.23**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.20](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.20.zip)
+[下载 Matrixapi-imagegen v1.8.23](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.23.zip)
 
 解压后按系统运行安装程序：
 
@@ -197,3 +197,4 @@ python skills/Matrixapi-imagegen/scripts/generate.py --task-id task-example-0002
 ```
 
 Never commit API keys or other credentials to this repository.
+
