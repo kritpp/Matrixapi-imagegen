@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.19**
+Current release: **v1.8.20**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.19](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.19.zip)
+[下载 Matrixapi-imagegen v1.8.20](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.20.zip)
 
 解压后按系统运行安装程序：
 
@@ -19,7 +19,7 @@ Current release: **v1.8.19**
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
-本版本对编辑请求默认使用上游最低 `1K` 档位并保持输入图片比例；只有上游明确拒绝最低档位且确认未扣费时才静默升级一次到 `2K`。不执行尺寸预检、裁剪或本地重绘，普通生成和渠道配置不变。
+本版本以 v1.8.19 为基线，保留异步任务编号兼容和防重复计费保护，并合并 v1.8.18 的比例透传修复。客户明确指定的比例（包括 `16:9`、`21:9` 等正整数比例）原样发送给上游；编辑默认保持输入图片比例，不做比例预检、自动替换、裁剪、本地重绘或二次提交。未指定比例时使用模型默认值，普通生成和渠道配置不变。
 
 安装位置：
 
@@ -66,7 +66,7 @@ export IMAGEGEN_MODEL="gpt-image-2"
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
 `https://matrixapii.com`。需要 Pro 时，只把 `IMAGEGEN_MODEL` 改为
-`gpt-image-2-pro`。
+`gemini-3-pro-image`。
 
 macOS 一键安装器会将 Key 和模型保存到权限为仅当前用户可读的
 `~/.codex/Matrixapi-imagegen.env`；Skill 会自动读取该文件，但不会从中读取 URL。
@@ -126,11 +126,11 @@ python skills/Matrixapi-imagegen/scripts/generate.py --task-id task-story-0001 \
   --size 4K --quality high
 ```
 
-When editing a local image without an explicit `--aspect-ratio`, the Skill reads
-the first input image dimensions and chooses the closest supported model ratio
-(`1:1`, `3:2`, or `2:3`). Use `--output-size WIDTHxHEIGHT` when the final file
-must have the exact original pixel dimensions; this is deterministic local
-post-processing after model generation.
+When editing or generating with an explicit `--aspect-ratio` such as `16:9`, the
+Skill forwards that ratio unchanged to the configured upstream. It does not
+choose a nearest enum ratio or resubmit with a different size. Use
+`--output-size WIDTHxHEIGHT` only when the customer explicitly requests local
+deterministic post-processing.
 
 Local image edits use semantic whole-image reference editing by default so new
 content can match the scene's perspective, lighting, shadows, and texture. For
