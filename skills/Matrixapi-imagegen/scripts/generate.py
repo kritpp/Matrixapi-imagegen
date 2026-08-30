@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.26"
+SKILL_VERSION = "1.8.27"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -824,6 +824,54 @@ def _parse_api_response(raw: bytes) -> dict[str, Any]:
     return result
 
 
+def _normalize_task_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Normalize common relay wrappers before async completion handling.
+
+    Relays do not all return the completed image list at the same level.  A
+    successful task may be wrapped in ``result``, ``output``, ``task`` or a
+    single ``image`` object.  Treating those responses as merely "no async
+    result" caused the caller to submit the already-billed request again.
+    """
+    if not isinstance(result, dict):
+        return {}
+    normalized: dict[str, Any] = dict(result)
+    for key in ("result", "output", "task", "response"):
+        nested = normalized.get(key)
+        if isinstance(nested, dict):
+            merged = dict(nested)
+            for outer_key in ("id", "task_id", "status", "state", "error", "failure_reason"):
+                if outer_key in normalized and outer_key not in merged:
+                    merged[outer_key] = normalized[outer_key]
+            normalized = merged
+            break
+    data = normalized.get("data")
+    if isinstance(data, dict):
+        normalized["data"] = [data]
+    elif data is None:
+        for key in ("images", "outputs", "files"):
+            value = normalized.get(key)
+            if isinstance(value, list) and value:
+                normalized["data"] = value
+                break
+        else:
+            image = normalized.get("image")
+            if isinstance(image, dict):
+                normalized["data"] = [image]
+            elif isinstance(image, str) and image:
+                normalized["data"] = [{"url": image}]
+    data = normalized.get("data")
+    if isinstance(data, list):
+        normalized["data"] = [
+            {"url": item} if isinstance(item, str) else item
+            for item in data
+            if isinstance(item, (dict, str))
+        ]
+    status = normalized.get("status") or normalized.get("state")
+    if status is not None:
+        normalized["status"] = str(status).strip().lower()
+    return normalized
+
+
 def _post_image_request(
     endpoint: str,
     key: str,
@@ -953,6 +1001,7 @@ def _get_image_request(endpoint: str, key: str, timeout: int) -> dict[str, Any]:
 def wait_for_task(
     result: dict[str, Any], endpoint: str, key: str, timeout: int
 ) -> dict[str, Any]:
+    result = _normalize_task_result(result)
     if result.get("data"):
         return result
     task_id = str(result.get("id") or result.get("task_id") or "").strip()
@@ -962,11 +1011,47 @@ def wait_for_task(
     status_url = _status_endpoint(endpoint, task_id)
     latest = result
     while time.monotonic() < deadline:
-        latest = _get_image_request(status_url, key, min(60, max(10, timeout)))
+        try:
+            latest = _normalize_task_result(
+                _get_image_request(status_url, key, min(60, max(10, timeout)))
+            )
+        except ImageGenError as exc:
+            # A task can be committed before the relay's status index is
+            # visible.  Retry only the free status GET; never submit another
+            # billed image request from this path.
+            detail = str(exc).lower()
+            retryable = any(
+                marker in detail
+                for marker in (
+                    "http 404",
+                    "http 408",
+                    "http 409",
+                    "http 425",
+                    "http 429",
+                    "http 500",
+                    "http 502",
+                    "http 503",
+                    "http 504",
+                    "timed out",
+                    "temporarily",
+                )
+            )
+            if not retryable:
+                raise
+            time.sleep(1)
+            continue
         status = str(latest.get("status") or "").lower()
-        if status in {"succeeded", "completed"} or (latest.get("data") and not status):
+        if status in {
+            "succeeded",
+            "success",
+            "completed",
+            "complete",
+            "done",
+            "finished",
+            "ready",
+        } or latest.get("data"):
             return latest
-        if status in {"failed", "error", "cancelled"}:
+        if status in {"failed", "failure", "error", "cancelled", "canceled"}:
             reason = latest.get("failure_reason") or latest.get("error") or status
             reason_text = (
                 json.dumps(reason, ensure_ascii=False)
@@ -1278,7 +1363,9 @@ def _local_reference_fingerprint(
         except OSError as exc:
             raise ImageGenError(f"Unable to fingerprint input image: {path}") from exc
         return {
-            "path": path.as_posix(),
+            # Clipboard and recovery flows may copy the same image to a new
+            # temporary path.  The path is not part of request identity;
+            # otherwise a lost stdout response becomes a second paid request.
             "size": size,
             "sha256": digest.hexdigest(),
         }
