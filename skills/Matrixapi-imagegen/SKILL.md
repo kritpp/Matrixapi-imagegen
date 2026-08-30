@@ -168,9 +168,13 @@ is unknown, block the identical retry and ask for confirmation before using
 
 Each API request is keyed by a deterministic fingerprint containing the current
 Codex thread, prompt, model, mode, size, quality, count, and the ordered
-reference-image content. The script's existing idempotency record and lock are
-still required for crash/retry protection; only the user-intent routing above
-decides whether a fresh task is allowed.
+reference-image content (content digests, not temporary clipboard paths). The
+script's existing idempotency record and lock are still required for
+crash/retry protection; only the user-intent routing above decides whether a
+fresh task is allowed. If an async status GET briefly returns 404/5xx or a
+relay wraps the completed image under `result`, `output`, `task`, `images`, or
+`files`, the script normalizes the response and retries only the free status
+GET. It must never resubmit the billed image request.
 
 When the user explicitly asks to update Matrixapi-imagegen, run exactly once:
 
