@@ -60,6 +60,18 @@ Generate or edit images with the bundled script and show the saved result to the
 
    User-visible wording: say “模型”, “模型服务”, or “中转站” for normal status and errors. Say “模型明确拒绝” only when the response explicitly contains a content, copyright, trademark, safety, moderation, or other policy refusal; a generic 400 is an unknown error.
 
+### Immediate result handoff (global)
+
+The JSON from the current `generate.py` command is the terminal result of the
+image action. As soon as it contains `ok: true` and a non-empty
+`preview_files`, render those files in the same assistant response and stop
+the action. Do not start another reasoning turn, call `/v1/responses`, send the
+reference images or prompt again, ask the model to describe or verify the
+image, or wait for a second confirmation. This applies to new generations,
+edits, reference-image requests, 4K/Pro, Yaliai, and story pages. If the local
+file is already present but display handoff is pending, use the saved
+`preview_files` paths immediately; never rebuild the request from references.
+
 ## Reference Editing Strategy
 
 Use semantic whole-image reference editing by default. The model should see the
