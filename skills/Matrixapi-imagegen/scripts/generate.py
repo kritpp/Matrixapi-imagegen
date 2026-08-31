@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.35"
+SKILL_VERSION = "1.8.36"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -1173,6 +1173,31 @@ def wait_for_task(
         # keeping a single status request in flight.
         time.sleep(1)
     raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
+
+
+def response_requires_task_polling(result: dict[str, Any]) -> bool:
+    """Return whether a successful image response is a task envelope.
+
+    Some routes acknowledge even a 1K request with ``202`` and a task id,
+    rather than returning image data directly. The wire status is not
+    available after urllib has parsed a successful response, so decide from
+    the response shape: an id without usable image data is a task that must
+    be queried. This path only performs free status GETs; it never submits
+    another image request.
+    """
+    normalized = _normalize_task_result(result)
+    if normalized.get("data"):
+        return False
+    return bool(str(normalized.get("id") or normalized.get("task_id") or "").strip())
+
+
+def resolve_image_task_response(
+    result: dict[str, Any], endpoint: str, key: str, timeout: int, async_mode: bool
+) -> dict[str, Any]:
+    """Poll an acknowledged task when explicitly async or task-shaped."""
+    if async_mode or response_requires_task_polling(result):
+        return wait_for_task(result, endpoint, key, timeout)
+    return result
 
 
 def _safe_filename(path: Path) -> str:
@@ -2596,8 +2621,9 @@ def main() -> int:
             prompt_compacted = bool(result.pop("_matrixapi_prompt_compacted", False))
             prompt_limit = result.pop("_matrixapi_prompt_limit", None)
             result_endpoint = generation_url if async_mode else edit_url
-            if async_mode:
-                result = wait_for_task(result, generation_url, key, args.timeout)
+            result = resolve_image_task_response(
+                result, generation_url, key, args.timeout, async_mode
+            )
         else:
             options["aspect_ratio"] = aspect_ratio
             request_submitted = True
@@ -2621,8 +2647,9 @@ def main() -> int:
             prompt_compacted = bool(result.pop("_matrixapi_prompt_compacted", False))
             prompt_limit = result.pop("_matrixapi_prompt_limit", None)
             result_endpoint = generation_url
-            if async_mode:
-                result = wait_for_task(result, generation_url, key, args.timeout)
+            result = resolve_image_task_response(
+                result, generation_url, key, args.timeout, async_mode
+            )
         files = save_images(
             result,
             result_endpoint,

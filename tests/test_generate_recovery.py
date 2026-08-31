@@ -151,6 +151,42 @@ class AsyncResultRecoveryTests(unittest.TestCase):
         self.assertEqual(result["data"][0]["url"], "https://example.test/a.png")
         self.assertEqual(status_get.call_count, 2)
 
+    def test_ordinary_1k_task_envelope_is_polled_without_a_second_submit(self) -> None:
+        acknowledged = {"id": "task-1k-202", "status": "queued"}
+        completed = {"data": [{"url": "https://example.test/1k.png"}]}
+
+        with mock.patch.object(
+            generate, "wait_for_task", return_value=completed
+        ) as status_wait:
+            result = generate.resolve_image_task_response(
+                acknowledged,
+                "https://relay.test/v1/images/generations",
+                "secret",
+                30,
+                async_mode=False,
+            )
+
+        self.assertEqual(result, completed)
+        status_wait.assert_called_once_with(
+            acknowledged,
+            "https://relay.test/v1/images/generations",
+            "secret",
+            30,
+        )
+
+    def test_direct_image_response_does_not_poll(self) -> None:
+        direct = {"data": [{"b64_json": "aW1hZ2U="}]}
+        with mock.patch.object(generate, "wait_for_task") as status_wait:
+            result = generate.resolve_image_task_response(
+                direct,
+                "https://relay.test/v1/images/generations",
+                "secret",
+                30,
+                async_mode=False,
+            )
+        self.assertEqual(result, direct)
+        status_wait.assert_not_called()
+
     def test_transient_submit_failure_is_not_replayed_as_stale_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
