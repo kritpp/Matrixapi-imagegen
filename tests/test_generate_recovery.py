@@ -22,6 +22,75 @@ SPEC.loader.exec_module(generate)
 
 
 class AsyncResultRecoveryTests(unittest.TestCase):
+    def test_long_prompt_is_sent_verbatim_when_upstream_accepts_it(self) -> None:
+        prompt = "完整约束。" * 700
+        bodies: list[dict] = []
+
+        def fake_post(_endpoint, _key, body, _content_type, _timeout, _idempotency):
+            bodies.append(generate.json.loads(body.decode("utf-8")))
+            return {"data": [{"b64_json": "aW1hZ2U="}]}
+
+        with mock.patch.object(generate, "_post_image_request", side_effect=fake_post):
+            result = generate.call_api(
+                "https://relay.test/v1/images/generations",
+                "secret",
+                "gpt-image-2",
+                prompt,
+                "4K",
+                1,
+                30,
+            )
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(bodies[0]["prompt"], prompt)
+        self.assertNotIn("_matrixapi_prompt_compacted", result)
+
+    def test_explicit_prompt_length_rejection_compacts_once(self) -> None:
+        prompt = "主体与构图必须保留。不要遗漏角色。" * 200
+        bodies: list[dict] = []
+
+        def fake_post(_endpoint, _key, body, _content_type, _timeout, _idempotency):
+            bodies.append(generate.json.loads(body.decode("utf-8")))
+            if len(bodies) == 1:
+                raise generate.ImageGenError(
+                    "HTTP 400 prompt too long; maximum 1024 characters",
+                    status_code=400,
+                )
+            return {"data": [{"b64_json": "aW1hZ2U="}]}
+
+        with mock.patch.object(generate, "_post_image_request", side_effect=fake_post):
+            result = generate.call_api(
+                "https://relay.test/v1/images/generations",
+                "secret",
+                "gpt-image-2",
+                prompt,
+                "4K",
+                1,
+                30,
+                idempotency_key="f" * 64,
+            )
+        self.assertEqual(len(bodies), 2)
+        self.assertEqual(bodies[0]["prompt"], prompt)
+        self.assertLessEqual(len(bodies[1]["prompt"]), 1024)
+        self.assertTrue(result["_matrixapi_prompt_compacted"])
+
+    def test_generic_400_never_triggers_prompt_retry(self) -> None:
+        with mock.patch.object(
+            generate,
+            "_post_image_request",
+            side_effect=generate.ImageGenError("HTTP 400 request failed", status_code=400),
+        ) as post:
+            with self.assertRaises(generate.ImageGenError):
+                generate.call_api(
+                    "https://relay.test/v1/images/generations",
+                    "secret",
+                    "gpt-image-2",
+                    "长提示词" * 1000,
+                    "4K",
+                    1,
+                    30,
+                )
+        self.assertEqual(post.call_count, 1)
+
     def test_common_success_wrappers_are_normalized(self) -> None:
         cases = (
             {"status": "success", "image": "https://example.test/a.png"},

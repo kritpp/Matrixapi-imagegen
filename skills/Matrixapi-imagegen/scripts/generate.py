@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.30"
+SKILL_VERSION = "1.8.33"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -57,8 +57,6 @@ YALIAI_PROVIDER = "yaliai"
 # this changes only the response transport, never the source pixels or size.
 AUTO_ASYNC_REFERENCE_COUNT = 6
 AUTO_ASYNC_REFERENCE_BYTES = 48 * 1024 * 1024
-PROMPT_MAX_CHARS = 1024
-PROMPT_COMPACT_TARGET = 1000
 STORY_STATE_VERSION = 1
 MAX_STORY_PAGES = 20
 # Version 2 invalidates ledgers written by 1.8.28 and earlier. Those ledgers
@@ -126,6 +124,117 @@ ROUTE_MARKERS = (
     "模型不存在",
 )
 
+PROMPT_LENGTH_MARKERS = (
+    "prompt too long",
+    "prompt is too long",
+    "prompt length",
+    "maximum prompt",
+    "max prompt",
+    "character limit",
+    "characters maximum",
+    "too many characters",
+    "string too long",
+    "提示词过长",
+    "提示词太长",
+    "提示词长度",
+    "字符限制",
+    "字符上限",
+    "超过最大长度",
+    "长度超限",
+)
+
+
+def _prompt_limit_from_error(error: ImageGenError) -> int | None:
+    """Return a character limit only for an explicit pre-acceptance rejection."""
+    if error.status_code not in {400, 413, 422}:
+        return None
+    detail = str(error).lower()
+    if not any(marker.lower() in detail for marker in PROMPT_LENGTH_MARKERS):
+        return None
+    for pattern in (
+        r"(?:max(?:imum)?|limit(?:ed)?|up to)\D{0,24}(\d{2,6})\s*(?:characters?|chars?)",
+        r"(?:最大|上限|限制|不超过)\D{0,16}(\d{2,6})\s*(?:个)?(?:字符|字)",
+        r"(\d{2,6})\s*(?:characters?|chars?|个字符|字符)(?:\s*(?:max(?:imum)?|limit|上限|限制))",
+    ):
+        match = re.search(pattern, detail, re.IGNORECASE)
+        if match:
+            value = int(match.group(1))
+            if 64 <= value <= 100_000:
+                return value
+    # Legacy GPT Image compatible routes commonly use 1024 characters but do
+    # not always expose the numeric limit.  This default is used only after an
+    # explicit prompt-length rejection, never as a preflight restriction.
+    return 1024
+
+
+def compact_prompt_for_upstream(prompt: str, limit: int) -> str:
+    """Fallback-only compaction that keeps exact text and ordered constraints."""
+    normalized = re.sub(r"[ \t\r\f\v]+", " ", prompt).strip()
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    if len(normalized) <= limit:
+        return normalized
+
+    exact: list[str] = []
+    for pattern in (
+        r"“[^”]{1,500}”",
+        r"「[^」]{1,500}」",
+        r"《[^》]{1,500}》",
+        r'"[^"]{1,500}"',
+        r"'[^']{1,500}'",
+    ):
+        for match in re.finditer(pattern, normalized):
+            if match.group(0) not in exact:
+                exact.append(match.group(0))
+    exact_clause = "\n精确保留文字：" + "；".join(exact) if exact else ""
+    if len(exact_clause) >= limit - 48:
+        raise ImageGenError(
+            "上游明确拒绝了长提示词，但必须逐字保留的文字本身已超过其限制；"
+            "本次未进行第二次提交。"
+        )
+
+    budget = limit - len(exact_clause)
+    # Split at natural Chinese/English sentence or clause boundaries.  Keep
+    # original order while prioritising subject setup and explicit constraints.
+    clauses = [
+        value.strip()
+        for value in re.split(r"(?<=[。！？!?；;])|\n+", normalized)
+        if value.strip()
+    ]
+    selected: set[int] = set()
+    used = 0
+    important = re.compile(
+        r"(必须|不要|不得|仅|只|保持|保留|精确|文字|角色|尺寸|比例|构图|镜头|"
+        r"must|never|only|preserve|exact|text|character|ratio|composition)",
+        re.IGNORECASE,
+    )
+    ranked = sorted(
+        range(len(clauses)),
+        key=lambda index: (
+            0 if index < 2 else 1,
+            0 if important.search(clauses[index]) else 1,
+            index,
+        ),
+    )
+    for index in ranked:
+        clause = clauses[index]
+        addition = len(clause) + (1 if selected else 0)
+        if used + addition <= budget:
+            selected.add(index)
+            used += addition
+    compacted = "\n".join(clauses[index] for index in sorted(selected)).strip()
+    if not compacted:
+        compacted = normalized[:budget].rstrip()
+    result = (compacted + exact_clause).strip()
+    return result[:limit]
+
+
+def _fallback_idempotency_key(original_key: str, prompt: str) -> str:
+    if not original_key:
+        return ""
+    return hashlib.sha256(
+        f"{original_key}:prompt-length-fallback:{prompt}".encode("utf-8")
+    ).hexdigest()
+
 
 def _diagnose_upstream_failure(detail: str, status_code: int | None = None) -> tuple[str, str]:
     """Classify a relay/upstream error without pretending a generic 400 is a policy verdict."""
@@ -167,58 +276,6 @@ def _format_upstream_error(detail: str, status_code: int | None = None) -> str:
     status = f"HTTP {status_code}" if status_code is not None else "异步任务失败"
     raw = (detail or "未提供详细原因").strip()[:1000]
     return f"{status} [{category}] {explanation} 原始信息: {raw}"
-
-
-EXACT_TEXT_PATTERNS = (
-    r"“[^”]{1,400}”",
-    r"「[^」]{1,400}」",
-    r"《[^》]{1,400}》",
-    r'"[^"]{1,400}"',
-    r"'[^']{1,400}'",
-)
-
-
-def _exact_text_segments(prompt: str) -> list[str]:
-    """Return quoted text that must survive prompt compaction verbatim."""
-    found: list[str] = []
-    for pattern in EXACT_TEXT_PATTERNS:
-        for match in re.finditer(pattern, prompt):
-            value = match.group(0)
-            if value not in found:
-                found.append(value)
-    return found
-
-
-def compact_prompt(prompt: str, limit: int = PROMPT_MAX_CHARS) -> tuple[str, bool]:
-    """Keep an overlong prompt within the upstream limit without losing exact text."""
-    normalized = re.sub(r"\s+", " ", prompt).strip()
-    if len(normalized) <= limit:
-        return normalized, False
-
-    protected = _exact_text_segments(normalized)
-    protected_clause = "；精确文字：" + "，".join(protected) if protected else ""
-    if len(protected_clause) >= limit - 32:
-        raise ImageGenError(
-            "指定文字过长，无法在模型提示词限制内完整保留；本次未发送，也不会扣费。"
-        )
-    target = min(limit, PROMPT_COMPACT_TARGET)
-    marker = "..."
-    available = max(32, target - len(marker) - 1 - len(protected_clause))
-    head_budget = max(16, int(available * 0.72))
-    tail_budget = max(16, available - head_budget)
-    head = normalized[:head_budget].rstrip(" ,;:")
-    tail = normalized[-tail_budget:].lstrip(" ,;:")
-    compacted = f"{head}{marker} {tail}{protected_clause}".strip()
-    if len(compacted) > limit:
-        # Trim only the descriptive head/tail; never truncate the protected
-        # exact-text clause at the end of the prompt.
-        excess = len(compacted) - limit
-        head = head[: max(0, len(head) - excess)].rstrip(" ,;:")
-        compacted = f"{head}{marker} {tail}{protected_clause}".strip()
-        if len(compacted) > limit:
-            tail = tail[: max(0, len(tail) - (len(compacted) - limit))].rstrip(" ,;:")
-            compacted = f"{head}{marker} {tail}{protected_clause}".strip()
-    return compacted, True
 
 
 def _environment_value(name: str) -> str:
@@ -985,14 +1042,34 @@ def call_api(
         payload["webhook"] = webhook
     if metadata:
         payload["metadata"] = metadata
-    return _post_image_request(
-        endpoint,
-        key,
-        json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        "application/json",
-        timeout,
-        idempotency_key,
-    )
+    try:
+        return _post_image_request(
+            endpoint,
+            key,
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            "application/json",
+            timeout,
+            idempotency_key,
+        )
+    except ImageGenError as exc:
+        limit = _prompt_limit_from_error(exc)
+        if limit is None or len(prompt) <= limit:
+            raise
+        fallback_prompt = compact_prompt_for_upstream(prompt, limit)
+        if fallback_prompt == prompt:
+            raise
+        payload["prompt"] = fallback_prompt
+        result = _post_image_request(
+            endpoint,
+            key,
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            "application/json",
+            timeout,
+            _fallback_idempotency_key(idempotency_key, fallback_prompt),
+        )
+        result["_matrixapi_prompt_compacted"] = True
+        result["_matrixapi_prompt_limit"] = limit
+        return result
 
 
 def _status_endpoint(endpoint: str, task_id: str) -> str:
@@ -1242,9 +1319,33 @@ def call_edit_api(
         files.append(("mask", filename, mime, data))
 
     body, content_type = _multipart_body(fields, files)
-    return _post_image_request(
-        endpoint, key, body, content_type, timeout, idempotency_key
-    )
+    try:
+        return _post_image_request(
+            endpoint, key, body, content_type, timeout, idempotency_key
+        )
+    except ImageGenError as exc:
+        limit = _prompt_limit_from_error(exc)
+        if limit is None or len(prompt) <= limit:
+            raise
+        fallback_prompt = compact_prompt_for_upstream(prompt, limit)
+        if fallback_prompt == prompt:
+            raise
+        fallback_fields = [
+            (name, fallback_prompt if name == "prompt" else value)
+            for name, value in fields
+        ]
+        fallback_body, fallback_content_type = _multipart_body(fallback_fields, files)
+        result = _post_image_request(
+            endpoint,
+            key,
+            fallback_body,
+            fallback_content_type,
+            timeout,
+            _fallback_idempotency_key(idempotency_key, fallback_prompt),
+        )
+        result["_matrixapi_prompt_compacted"] = True
+        result["_matrixapi_prompt_limit"] = limit
+        return result
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -1911,7 +2012,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--prompt",
-        help="Prompt text; GPT Image 2 upstream limit is 1024 characters (overlong text is compacted)",
+        help="Prompt text; sent verbatim without local compaction or length truncation",
     )
     parser.add_argument(
         "--prompt-file",
@@ -2225,7 +2326,7 @@ def main() -> int:
                         "credential_source": source,
                         "model": model,
                         "supported_models": list(SUPPORTED_MODELS),
-                        "prompt_limit": PROMPT_MAX_CHARS,
+                        "prompt_limit": None,
                         "supported_modes": [
                             "generate",
                             "edit",
@@ -2265,7 +2366,12 @@ def main() -> int:
         if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
         original_prompt_chars = len(raw_prompt)
-        prompt, prompt_compacted = compact_prompt(raw_prompt)
+        # Never alter a customer prompt locally.  Compression can discard
+        # constraints and exact wording, producing an unrelated image.  The
+        # configured upstream alone decides whether it accepts the full text.
+        prompt = raw_prompt
+        prompt_compacted = False
+        prompt_limit = None
 
         quality = validate_quality(args.quality)
         aspect_ratio = validate_aspect_ratio(args.aspect_ratio)
@@ -2487,6 +2593,8 @@ def main() -> int:
                 options,
                 idempotency_fingerprint,
             )
+            prompt_compacted = bool(result.pop("_matrixapi_prompt_compacted", False))
+            prompt_limit = result.pop("_matrixapi_prompt_limit", None)
             result_endpoint = generation_url if async_mode else edit_url
             if async_mode:
                 result = wait_for_task(result, generation_url, key, args.timeout)
@@ -2510,6 +2618,8 @@ def main() -> int:
                 metadata=metadata,
                 idempotency_key=idempotency_fingerprint,
             )
+            prompt_compacted = bool(result.pop("_matrixapi_prompt_compacted", False))
+            prompt_limit = result.pop("_matrixapi_prompt_limit", None)
             result_endpoint = generation_url
             if async_mode:
                 result = wait_for_task(result, generation_url, key, args.timeout)
@@ -2574,7 +2684,7 @@ def main() -> int:
             "model": model,
             "provider": provider,
             "count": len(files),
-            "prompt_limit": PROMPT_MAX_CHARS,
+            "prompt_limit": prompt_limit,
             "prompt_compacted": prompt_compacted,
             "prompt_original_chars": original_prompt_chars,
             "prompt_chars": len(prompt),
