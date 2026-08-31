@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.33**
+Current release: **v1.8.35**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.33](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.33.zip)
+[下载 Matrixapi-imagegen v1.8.35](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.35.zip)
 
 解压后按系统运行安装程序：
 
@@ -170,6 +170,13 @@ routes, upstream service failures, and relays that return only a generic
 not assumed to be a copyright verdict. Named franchise-character refusals are
 not bypassed with obfuscated prompts or repeated paid retries.
 
+An explicit content-policy refusal is scoped only to that accepted task. It
+must not become a conversation-wide block: when the customer later explicitly
+asks to generate again, the Skill starts one new task and checks the current
+upstream response, even in the same Codex conversation. It never disguises the
+subject or retries the old billed task; if the current upstream refuses again,
+that new task is reported once using its own actual response.
+
 ## Current-task result delivery
 
 Every generation or edit command uses a unique `--task-id`. The script writes one
@@ -178,6 +185,14 @@ and the exact image paths, while returning the same JSON on stdout. Codex uses
 only that current stdout result and never scans an image directory for a newer
 file. On Windows the JSON record is hidden shortly after stdout delivery without
 blocking the command or delaying image display.
+
+Async 2K/4K commands may run for several minutes. If the shell tool yields a
+running session/cell instead of an exit code, that is progress, not an image
+failure: Codex must keep waiting on that exact process until it exits and emits
+its terminal JSON. It must not answer the customer, classify the task as failed,
+or start another command while the original process is still running. A pending
+task continues to use free status GET requests and never resubmits the paid image
+request.
 
 Editing "the previous image" uses only the exact path returned by the preceding
 successful result in the same conversation. A request to generate a new image

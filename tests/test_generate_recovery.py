@@ -177,6 +177,27 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             )
             self.assertIsNone(cached2)
 
+    def test_terminal_content_policy_failure_does_not_block_later_new_task(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            fingerprint = "p" * 64
+            record, lock, cached = generate.claim_idempotency(
+                output_dir, fingerprint, "task-policy-first", 1
+            )
+            self.assertIsNone(cached)
+            generate.finish_idempotency(
+                record,
+                lock,
+                fingerprint,
+                "task-policy-first",
+                error="模型明确拒绝了这次内容/版权/安全策略请求",
+                uncertain=False,
+            )
+            _record2, _lock2, cached2 = generate.claim_idempotency(
+                output_dir, fingerprint, "task-policy-second", 1
+            )
+            self.assertIsNone(cached2)
+
     def test_old_idempotency_ledger_is_invalidated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
