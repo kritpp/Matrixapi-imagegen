@@ -58,6 +58,12 @@ Generate or edit images with the bundled script and show the saved result to the
    Do not put Windows `files` paths containing `\\` into Markdown; reserve `files` for the native saved-path report. Never omit the clickable original-image link.
 10. If generation or editing fails, report the sanitized error. Classify the failure as `content_policy` only when the model response explicitly mentions copyright, trademark, safety, moderation, disallowed content, or equivalent Chinese wording. Classify model/channel mapping failures separately. For a generic relay response such as HTTP 400 `request failed` / `bad_response_status_code`, say clearly that the cause is unknown and cannot be confirmed as copyright from that response alone; do not claim that the named character caused the failure. Include `model`, `quality`, requested size, actual edit size, whether the edit was resized, whether `prompt_compacted` was true, and any local post-processing status from the JSON fields. If model generation succeeds but local processing fails, return the original file and the local error; never repeat the billed API request automatically. Never reveal, repeat, or inspect API keys in the response. Reject unsupported model dimensions and missing input files locally without calling the API.
 
+   HTTP 503/429/5xx from the image submit endpoint is request-scoped: report that
+   current upstream error once, do not submit the same image request again, and
+   do not persist it as a reusable/uncertain result. The next customer request
+   must perform a fresh upstream check. Only a post-submit timeout or unknown
+   transport failure may remain `uncertain` for duplicate-charge protection.
+
    User-visible wording: say “模型”, “模型服务”, or “中转站” for normal status and errors. Say “模型明确拒绝” only when the response explicitly contains a content, copyright, trademark, safety, moderation, or other policy refusal; a generic 400 is an unknown error.
 
 ### Immediate result handoff (global)

@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.28"
+SKILL_VERSION = "1.8.29"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -76,7 +76,25 @@ MASK_SUPPORT_ENV = "IMAGEGEN_MASK_SUPPORT"
 
 
 class ImageGenError(RuntimeError):
-    pass
+    """A sanitized image error with transport metadata for safe recovery.
+
+    Transient HTTP failures returned before a usable result (notably 503)
+    must not be written as an ``uncertain`` idempotency result.  Otherwise a
+    later, healthy request can replay the old error instead of querying the
+    provider again.  Network/time-out failures after submission remain
+    uncertain and continue to protect against duplicate paid submissions.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
 
 
 CONTENT_POLICY_MARKERS = (
@@ -899,7 +917,14 @@ def _post_image_request(
             raw = _read_limited(response, MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         detail = _safe_http_detail(exc, key)
-        raise ImageGenError(_format_upstream_error(detail, exc.code)) from exc
+        # A gateway/rate-limit 5xx/429 is a request-scoped upstream failure.
+        # Do not cache it as an unknown paid outcome: the next request must
+        # perform a fresh status check instead of replaying this error.
+        raise ImageGenError(
+            _format_upstream_error(detail, exc.code),
+            status_code=exc.code,
+            retryable=exc.code in {408, 425, 429, 500, 502, 503, 504},
+        ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ImageGenError(f"Image API request failed: {exc}") from exc
     return _parse_api_response(raw)
@@ -993,7 +1018,11 @@ def _get_image_request(endpoint: str, key: str, timeout: int) -> dict[str, Any]:
             return _parse_api_response(_read_limited(response, MAX_RESPONSE_BYTES))
     except urllib.error.HTTPError as exc:
         detail = _safe_http_detail(exc, key)
-        raise ImageGenError(_format_upstream_error(detail, exc.code)) from exc
+        raise ImageGenError(
+            _format_upstream_error(detail, exc.code),
+            status_code=exc.code,
+            retryable=exc.code in {404, 408, 409, 425, 429, 500, 502, 503, 504},
+        ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ImageGenError(f"Image status request failed: {exc}") from exc
 
@@ -2576,13 +2605,26 @@ def main() -> int:
         return 0
     except ImageGenError as exc:
         _fail_story_page(story_path, task_id, str(exc))
+        # HTTP 503/429/5xx from the image endpoint is returned as the current
+        # request's error and is not reused for a later healthy request.  A
+        # transport timeout or an unknown post-submit failure remains
+        # ``uncertain`` to prevent a duplicate paid submission.
+        transient_upstream_failure = exc.retryable and exc.status_code in {
+            408,
+            425,
+            429,
+            500,
+            502,
+            503,
+            504,
+        }
         finish_idempotency(
             idempotency_record,
             idempotency_lock,
             idempotency_fingerprint,
             task_id,
             error=str(exc),
-            uncertain=request_submitted,
+            uncertain=request_submitted and not transient_upstream_failure,
         )
         print(
             json.dumps(
