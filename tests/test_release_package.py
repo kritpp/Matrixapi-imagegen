@@ -19,7 +19,9 @@ EXPECTED_PACKAGE_FILES = {
     "skills/Matrixapi-imagegen/scripts/generate.py",
     "skills/Matrixapi-imagegen/scripts/hide_result.py",
     "skills/Matrixapi-imagegen/scripts/postprocess.py",
+    "skills/Matrixapi-imagegen/scripts/reference_pack.py",
     "skills/Matrixapi-imagegen/scripts/update_skill.py",
+    "tests/test_generate_recovery.py",
 }
 
 

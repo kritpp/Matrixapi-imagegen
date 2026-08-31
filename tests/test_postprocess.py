@@ -90,13 +90,19 @@ class InputAspectRatioTests(unittest.TestCase):
             ("auto", "input_image"),
         )
 
-    def test_portrait_input_uses_two_three(self) -> None:
+    def test_portrait_input_keeps_auto_for_local_edit(self) -> None:
         source = self._write_image("portrait.png", (694, 1234))
-        self.assertEqual(generate.infer_image_aspect_ratio([str(source)]), "2:3")
+        self.assertEqual(
+            generate.resolve_aspect_ratio("auto", [str(source)]),
+            ("auto", "input_image"),
+        )
 
-    def test_square_input_uses_one_one(self) -> None:
+    def test_square_input_keeps_auto_for_local_edit(self) -> None:
         source = self._write_image("square.png", (1000, 1000))
-        self.assertEqual(generate.infer_image_aspect_ratio([str(source)]), "1:1")
+        self.assertEqual(
+            generate.resolve_aspect_ratio("auto", [str(source)]),
+            ("auto", "input_image"),
+        )
 
     def test_explicit_ratio_is_not_overridden(self) -> None:
         source = self._write_image("landscape.png", (1234, 694))
@@ -109,7 +115,7 @@ class InputAspectRatioTests(unittest.TestCase):
         source = self.root / "not-an-image.png"
         source.write_text("not an image", encoding="utf-8")
         with self.assertRaises(generate.ImageGenError):
-            generate.infer_image_aspect_ratio([str(source)])
+            generate.source_preserving_edit_size("4K", [str(source)])
 
     def test_auto_edit_size_preserves_wide_source_geometry(self) -> None:
         source = self._write_image("banner.png", (952, 376))
@@ -134,7 +140,7 @@ class ModelFailureDiagnosisTests(unittest.TestCase):
             },
         )()
         with self.assertRaises(generate.ImageGenError) as raised:
-            generate.validate_pro_edit_processing("gpt-image-2-pro", "edit", True, args)
+            generate.validate_pro_edit_processing("gemini-3-pro-image", "edit", True, args)
         self.assertIn("不会扣费", str(raised.exception))
 
     def test_pro_edit_allows_explicit_local_processing(self) -> None:
@@ -150,7 +156,7 @@ class ModelFailureDiagnosisTests(unittest.TestCase):
                 "allow_pro_postprocess": True,
             },
         )()
-        generate.validate_pro_edit_processing("gpt-image-2-pro", "edit", True, args)
+        generate.validate_pro_edit_processing("gemini-3-pro-image", "edit", True, args)
 
     def test_pro_edit_blocks_implicit_fixed_ratio(self) -> None:
         args = type(
@@ -167,7 +173,7 @@ class ModelFailureDiagnosisTests(unittest.TestCase):
             },
         )()
         with self.assertRaises(generate.ImageGenError):
-            generate.validate_pro_edit_processing("gpt-image-2-pro", "edit", True, args)
+            generate.validate_pro_edit_processing("gemini-3-pro-image", "edit", True, args)
 
     def test_4k_edit_is_not_changed_by_pro_guard(self) -> None:
         args = type(
@@ -186,12 +192,11 @@ class ModelFailureDiagnosisTests(unittest.TestCase):
 
     def test_gpt_image_mask_is_disabled_without_explicit_capability(self) -> None:
         with patch.dict("os.environ", {"IMAGEGEN_MASK_SUPPORT": "0"}):
-            self.assertFalse(generate.mask_support_enabled("gpt-image-2-pro"))
             self.assertFalse(generate.mask_support_enabled("gpt-image-2"))
 
     def test_gpt_image_mask_requires_explicit_capability(self) -> None:
         with patch.dict("os.environ", {"IMAGEGEN_MASK_SUPPORT": "1"}):
-            self.assertTrue(generate.mask_support_enabled("gpt-image-2-pro"))
+            self.assertTrue(generate.mask_support_enabled("gpt-image-2"))
 
     def test_other_models_keep_provider_mask_behavior(self) -> None:
         with patch.dict("os.environ", {"IMAGEGEN_MASK_SUPPORT": "0"}):

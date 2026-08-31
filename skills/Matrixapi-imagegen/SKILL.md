@@ -165,9 +165,10 @@ explicitly requests a new variant.
 When a long or quoted prompt is supplied through `--prompt-file`, use a
 short-lived file in the system temporary directory rather than the project
 working directory. The script accepts UTF-8, UTF-8 BOM, and UTF-16 LE/BE and
-reads the text once before the paid request. Do not expose the temporary
-filename in the response; the caller may remove its own temporary file after
-the command returns.
+reads the text once before the paid request. On Windows, once read, the source
+prompt file is marked hidden automatically; it is not deleted or changed. Do
+not expose the temporary filename in the response; the caller may remove its
+own temporary file after the command returns.
 
 ### Duplicate-charge protection and new generations
 

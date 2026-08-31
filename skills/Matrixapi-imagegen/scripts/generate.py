@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.29"
+SKILL_VERSION = "1.8.30"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -299,7 +299,7 @@ def _read_prompt_file(path: Path) -> str:
 
 
 def _hide_directory(path: Path) -> None:
-    """Mark an internal state directory hidden on Windows immediately."""
+    """Mark an internal state path hidden on Windows immediately."""
     if os.name != "nt":
         return
     try:
@@ -2077,6 +2077,12 @@ def main() -> int:
     if args.prompt_file is not None:
         try:
             args.prompt = _read_prompt_file(args.prompt_file)
+            # A prompt-file may be created beside the package by a shell or
+            # front-end.  Its contents have already been read, so hide it at
+            # once instead of leaving customer-visible prompt text behind.
+            # This is deliberately non-destructive and never changes prompt
+            # content, length limits, or the outbound request.
+            _hide_directory(args.prompt_file.expanduser())
         except ImageGenError as exc:
             print(str(exc), file=sys.stderr)
             return 2
