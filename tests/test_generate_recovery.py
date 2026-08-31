@@ -108,6 +108,22 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             )
             self.assertIsNone(cached2)
 
+    def test_old_idempotency_ledger_is_invalidated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            fingerprint = "o" * 64
+            record_path = generate.idempotency_record_path(output_dir, fingerprint)
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(
+                '{"version":1,"status":"uncertain","task_id":"old-task",'
+                '"created_at_ms":9999999999999,"error":"HTTP 503"}',
+                encoding="utf-8",
+            )
+            _record, _lock, cached = generate.claim_idempotency(
+                output_dir, fingerprint, "task-new-1234", 1
+            )
+            self.assertIsNone(cached)
+
 
 if __name__ == "__main__":
     unittest.main()

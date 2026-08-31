@@ -61,7 +61,10 @@ PROMPT_MAX_CHARS = 1024
 PROMPT_COMPACT_TARGET = 1000
 STORY_STATE_VERSION = 1
 MAX_STORY_PAGES = 20
-IDEMPOTENCY_VERSION = 1
+# Version 2 invalidates ledgers written by 1.8.28 and earlier. Those ledgers
+# could contain a stale ``uncertain`` 503 and incorrectly block a later
+# request after the customer manually changed channels.
+IDEMPOTENCY_VERSION = 2
 IDEMPOTENCY_TTL_MS = 15 * 60 * 1000
 IDEMPOTENCY_WAIT_INTERVAL_SECONDS = 0.2
 # The pinned GPT Image 2 routes accept native 4K edits. Older relays can still
@@ -1462,6 +1465,16 @@ def claim_idempotency(
         now_ms = time.time_ns() // 1_000_000
         record = _load_idempotency_record(record_path)
         if record:
+            if int(record.get("version") or 0) != IDEMPOTENCY_VERSION:
+                # A ledger from an older Skill has different error-lifecycle
+                # semantics; never reuse it for the current request.
+                try:
+                    record_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                record = None
+            if record is None:
+                continue
             age_ms = now_ms - int(record.get("created_at_ms") or 0)
             if 0 <= age_ms <= IDEMPOTENCY_TTL_MS:
                 status = record.get("status")
