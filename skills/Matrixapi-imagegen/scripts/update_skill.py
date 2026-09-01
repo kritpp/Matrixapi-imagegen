@@ -32,6 +32,7 @@ MAX_EXTRACTED_BYTES = 120 * 1024 * 1024
 MAX_ARCHIVE_FILES = 500
 LIST_TIMEOUT_SECONDS = 8
 DOWNLOAD_TIMEOUT_SECONDS = 30
+DOWNLOAD_ATTEMPTS_PER_SOURCE = 3
 SKILL_RELATIVE_PATH = ("skills", "Matrixapi-imagegen")
 REQUIRED_FILES = (
     "SKILL.md",
@@ -50,7 +51,7 @@ class UpdateError(RuntimeError):
     pass
 
 
-def _resolve_archive_url() -> str:
+def _resolve_archive_urls() -> tuple[str, str]:
     request = urllib.request.Request(
         REPOSITORY_CONTENTS_API,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "Matrixapi-imagegen-updater/1.0"},
@@ -63,15 +64,19 @@ def _resolve_archive_url() -> str:
             if len(payload) > 1024 * 1024:
                 raise UpdateError("The GitHub package listing is unexpectedly large")
             listing = json.loads(payload)
-            candidates: list[tuple[tuple[int, int, int], str]] = []
+            candidates: list[tuple[tuple[int, int, int], str, str]] = []
             for item in listing:
                 match = PACKAGE_NAME_PATTERN.fullmatch(str(item.get("name", "")))
                 download_url = str(item.get("download_url", ""))
                 if match and download_url.startswith("https://"):
-                    candidates.append((tuple(map(int, match.groups())), download_url))
+                    candidates.append((tuple(map(int, match.groups())), match.group(0), download_url))
             if not candidates:
                 raise UpdateError("The GitHub repository does not contain a release package")
-            return max(candidates)[1]
+            _, filename, raw_url = max(candidates, key=lambda item: item[0])
+            api_url = (
+                f"{REPOSITORY_CONTENTS_API}/{urllib.parse.quote(filename)}?ref=main"
+            )
+            return api_url, raw_url
         except (urllib.error.URLError, TimeoutError, OSError, ValueError, TypeError) as exc:
             last_error = exc
             if attempt < 1:
@@ -97,26 +102,36 @@ def _safe_member_path(name: str) -> tuple[str, ...]:
     return parts
 
 
-def _download_archive(url: str) -> bytes:
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/zip", "User-Agent": "Matrixapi-imagegen-updater/1.0"},
-    )
+def _download_archive(urls: tuple[str, ...]) -> bytes:
     last_error: Exception | None = None
-    for attempt in range(2):
-        try:
-            with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
-                data = response.read(MAX_ARCHIVE_BYTES + 1)
-            break
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            last_error = exc
-            if attempt < 1:
-                time.sleep(0.5)
-    else:
-        raise UpdateError(f"Unable to download the latest Skill after 2 attempts: {last_error}") from last_error
-    if len(data) > MAX_ARCHIVE_BYTES:
-        raise UpdateError("The update archive is larger than the local safety limit")
-    return data
+    for url in urls:
+        parsed = urllib.parse.urlparse(url)
+        accept = (
+            "application/vnd.github.raw+json"
+            if parsed.netloc == "api.github.com"
+            else "application/zip"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={"Accept": accept, "User-Agent": "Matrixapi-imagegen-updater/1.0"},
+        )
+        for attempt in range(DOWNLOAD_ATTEMPTS_PER_SOURCE):
+            try:
+                with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+                    data = response.read(MAX_ARCHIVE_BYTES + 1)
+                if len(data) > MAX_ARCHIVE_BYTES:
+                    raise UpdateError("The update archive is larger than the local safety limit")
+                return data
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+                if attempt + 1 < DOWNLOAD_ATTEMPTS_PER_SOURCE:
+                    time.sleep(0.75 * (attempt + 1))
+    total_attempts = len(urls) * DOWNLOAD_ATTEMPTS_PER_SOURCE
+    raise UpdateError(
+        f"Unable to download the latest Skill after {total_attempts} attempts; "
+        "the current installation was left unchanged: "
+        f"{last_error}"
+    ) from last_error
 
 
 def _find_skill_prefix(archive: zipfile.ZipFile) -> tuple[str, ...]:
@@ -295,9 +310,9 @@ def update_skill(archive_url: str, target: Path) -> dict:
     try:
         with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_file:
             lock_file.write(str(os.getpid()))
-        resolved_url = archive_url or _resolve_archive_url()
-        expected_version = _archive_version(resolved_url)
-        archive_data = _download_archive(resolved_url)
+        archive_urls = (archive_url,) if archive_url else _resolve_archive_urls()
+        expected_version = _archive_version(archive_urls[0])
+        archive_data = _download_archive(archive_urls)
         with tempfile.TemporaryDirectory(
             prefix=".matrixapi-imagegen-update-", dir=str(target.parent)
         ) as temp_dir:
