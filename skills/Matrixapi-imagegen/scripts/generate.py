@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.40"
+SKILL_VERSION = "1.8.41"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -2008,6 +2008,23 @@ def _utc_millis_text(timestamp_ms: int) -> str:
     return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(seconds))}.{millis:03d}Z"
 
 
+def format_display_summary(
+    requested_size: str,
+    actual_size: str,
+    quality: str,
+    aspect_ratio: str,
+) -> str:
+    """Build the local-only metadata line shown beside a delivered image."""
+    requested = str(requested_size or actual_size or "auto").strip() or "auto"
+    actual = str(actual_size or "").strip()
+    parts = [f"尺寸：{requested}"]
+    if actual and actual != requested:
+        parts.append(f"实际像素：{actual}")
+    parts.append(f"比例：{str(aspect_ratio or 'auto').strip() or 'auto'}")
+    parts.append(f"画质：{str(quality or 'auto').strip() or 'auto'}")
+    return "｜".join(parts)
+
+
 def _schedule_result_hide(path: Path) -> bool:
     """Hide a delivered result later without delaying stdout or command exit."""
     if os.name != "nt":
@@ -2758,6 +2775,12 @@ def main() -> int:
                 raise ImageGenError("Story page completed without a usable original image")
             story_state = _complete_story_page(story_path, task_id, original_files[0])
             story_payload = story_result_payload(story_path, story_state)
+        display_summary = format_display_summary(
+            requested_size=requested_size,
+            actual_size=size,
+            quality=quality,
+            aspect_ratio=aspect_ratio,
+        )
         success_payload = {
             "ok": True,
             "skill_name": SKILL_NAME,
@@ -2777,6 +2800,7 @@ def main() -> int:
             "quality": quality,
             "aspect_ratio": aspect_ratio,
             "aspect_ratio_source": aspect_ratio_source,
+            "display_summary": display_summary,
             "async": async_mode,
             "async_requested": requested_async,
             "async_auto": auto_async,
