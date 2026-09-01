@@ -22,6 +22,13 @@ SPEC.loader.exec_module(generate)
 
 
 class AsyncResultRecoveryTests(unittest.TestCase):
+    def test_8k_size_is_preserved_without_local_downscale(self) -> None:
+        self.assertEqual(generate.normalize_size("8K"), "8K")
+        self.assertEqual(
+            generate.legacy_pixel_size("8K", "16:9"), "7680x4320"
+        )
+        self.assertEqual(generate.normalize_size("7680x4320"), "7680x4320")
+
     def test_long_prompt_is_sent_verbatim_when_upstream_accepts_it(self) -> None:
         prompt = "完整约束。" * 700
         bodies: list[dict] = []

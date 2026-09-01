@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.36"
+SKILL_VERSION = "1.8.37"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -46,9 +46,9 @@ MAX_IMAGE_BYTES = 50 * 1024 * 1024
 # leaves room for multipart headers and prevents a proxy from cutting off a
 # large request after the upstream task has already been billed.
 MAX_MULTIPART_BODY_BYTES = 192 * 1024 * 1024
-MAX_EDGE = 3840
+MAX_EDGE = 7680
 MIN_PIXELS = 655_360
-MAX_PIXELS = 14_745_600
+MAX_PIXELS = 58_982_400
 MAX_INPUT_IMAGES = 16
 MAX_YALIAI_SOURCE_IMAGES = 60
 YALIAI_PROVIDER = "yaliai"
@@ -573,7 +573,7 @@ def validate_size(size: str) -> str:
         raise ImageGenError("Size must use WIDTHxHEIGHT, for example 1024x1024")
     width, height = int(match.group(1)), int(match.group(2))
     if width > MAX_EDGE or height > MAX_EDGE:
-        raise ImageGenError("Image size must not exceed 3840px on either edge")
+        raise ImageGenError("Image size must not exceed 7680px on either edge")
     if width % 16 or height % 16:
         raise ImageGenError("Image width and height must both be multiples of 16px")
     long_edge, short_edge = max(width, height), min(width, height)
@@ -587,7 +587,7 @@ def validate_size(size: str) -> str:
     return f"{width}x{height}"
 
 
-SIZE_ALIASES = {"1K", "2K", "4K"}
+SIZE_ALIASES = {"1K", "2K", "4K", "8K"}
 
 
 def normalize_size(size: str) -> str:
@@ -605,6 +605,7 @@ def legacy_pixel_size(size: str, aspect_ratio: str) -> str:
         "1K": {"auto": "1024x1024", "1:1": "1024x1024", "3:2": "1536x1024", "2:3": "1024x1536"},
         "2K": {"auto": "2048x2048", "1:1": "2048x2048", "3:2": "2048x1360", "2:3": "1360x2048"},
         "4K": {"auto": "3840x2160", "1:1": "3840x3840", "3:2": "3840x2560", "2:3": "2560x3840"},
+        "8K": {"auto": "7680x4320", "1:1": "7680x7680", "3:2": "7680x5120", "2:3": "5120x7680"},
     }
     if aspect_ratio in dimensions[size]:
         return validate_size(dimensions[size][aspect_ratio])
@@ -612,7 +613,7 @@ def legacy_pixel_size(size: str, aspect_ratio: str) -> str:
     if not match:
         raise ImageGenError("Aspect ratio must use positive integers separated by ':'")
     ratio_width, ratio_height = int(match.group(1)), int(match.group(2))
-    long_edge = {"1K": 1024, "2K": 2048, "4K": 3840}[size]
+    long_edge = {"1K": 1024, "2K": 2048, "4K": 3840, "8K": 7680}[size]
     if ratio_width >= ratio_height:
         width = long_edge
         height = max(16, int(round(long_edge * ratio_height / ratio_width / 16)) * 16)
@@ -735,7 +736,7 @@ def source_preserving_edit_size(size: str, image_paths: list[str]) -> str:
     width, height = image_dimensions(image_paths[0])
     long_edge = max(width, height)
     short_edge = min(width, height)
-    tier_edges = {"1K": 1024, "2K": 2048, "4K": 3840}
+    tier_edges = {"1K": 1024, "2K": 2048, "4K": 3840, "8K": 7680}
     if size not in tier_edges:
         return validate_size(size)
 
@@ -743,7 +744,7 @@ def source_preserving_edit_size(size: str, image_paths: list[str]) -> str:
     # when scaled to a 1K long edge.  Do not fail locally and make Codex issue a
     # second paid command.  Silently choose the first valid supported tier and
     # keep the source ratio; an explicit 2K/4K request remains a lower bound.
-    ordered_tiers = ("1K", "2K", "4K")
+    ordered_tiers = ("1K", "2K", "4K", "8K")
     start = ordered_tiers.index(size)
     last_error: ImageGenError | None = None
     for tier in ordered_tiers[start:]:
@@ -2408,7 +2409,15 @@ def main() -> int:
                 raise ImageGenError(str(exc)) from exc
             if args.size is None:
                 longest = max(output_width, output_height)
-                requested_size = "1K" if longest <= 1024 else "2K" if longest <= 2048 else "4K"
+                requested_size = (
+                    "1K"
+                    if longest <= 1024
+                    else "2K"
+                    if longest <= 2048
+                    else "4K"
+                    if longest <= 3840
+                    else "8K"
+                )
             if aspect_ratio == "auto":
                 aspect_ratio = (
                     "1:1"

@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.36**
+Current release: **v1.8.37**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.36](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.36.zip)
+[下载 Matrixapi-imagegen v1.8.37](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.37.zip)
 
 解压后按系统运行安装程序：
 
@@ -20,6 +20,9 @@ Current release: **v1.8.36**
 重启 Codex。
 
 本版本不做比例预检或自动改比例。客户明确指定的比例（包括 `16:9`）原样发送给上游；不会因比例判断而二次提交、裁剪或本地重绘。未指定比例时才使用模型默认值，普通生成和渠道配置不变。
+
+本版本新增显式 `8K` 输出档位。只有客户明确要求 `8K` 时才发送该档位；
+`1K`、`2K`、`4K` 的默认行为、比例和画质参数保持不变。
 
 安装位置：
 
@@ -186,7 +189,7 @@ only that current stdout result and never scans an image directory for a newer
 file. On Windows the JSON record is hidden shortly after stdout delivery without
 blocking the command or delaying image display.
 
-Async 2K/4K commands may run for several minutes. If the shell tool yields a
+Async 2K/4K/8K commands may run for several minutes. If the shell tool yields a
 running session/cell instead of an exit code, that is progress, not an image
 failure: Codex must keep waiting on that exact process until it exits and emits
 its terminal JSON. It must not answer the customer, classify the task as failed,
