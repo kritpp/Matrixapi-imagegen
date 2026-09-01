@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.42"
+SKILL_VERSION = "1.8.43"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -1477,26 +1477,37 @@ def save_images(
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_id = uuid.uuid4().hex[:8]
-    # A task-scoped directory makes recovery deterministic after a Codex
-    # reconnect.  The legacy layout remains available for module callers that
-    # do not provide a task id.
-    task_output_dir = output_dir / task_id if task_id else output_dir
-    task_output_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[str] = []
-
     items = result.get("data") or result.get("results")
     if not isinstance(items, list) or not items:
         raise ImageGenError("Image API returned no image data")
 
-    for index, item in enumerate(items, start=1):
+    # Validate the complete response before creating any task-specific path.
+    # This prevents empty customer-visible directories when a relay returns an
+    # empty or malformed image response.
+    for item in items:
         if not isinstance(item, dict):
             raise ImageGenError("Image API returned an invalid image item")
+        if not item.get("b64_json") and not item.get("url"):
+            raise ImageGenError("Image item has neither url nor b64_json")
+
+    staging_dir: Path | None = None
+    if task_id:
+        # Keep incomplete downloads out of the customer-visible image folder.
+        # The staging directory is hidden on Windows and is removed when the
+        # complete response cannot be published.
+        staging_dir = output_dir / ".staging" / task_id
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        _hide_directory(staging_dir.parent)
+        _hide_directory(staging_dir)
+
+    staged_paths: list[Path] = []
+    final_paths: list[Path] = []
+
+    for index, item in enumerate(items, start=1):
         content_type = ""
-        final_path_base = (
-            task_output_dir / f"image-{stamp}-{run_id}-{index}"
-            if task_id
-            else output_dir / f"image-{stamp}-{run_id}-{index}"
-        )
+        prefix = f"image-{task_id}-" if task_id else "image-"
+        final_path_base = output_dir / f"{prefix}{stamp}-{run_id}-{index}"
+        stage_path_base = staging_dir / final_path_base.name if staging_dir else final_path_base
         if item.get("b64_json"):
             try:
                 data = base64.b64decode(item["b64_json"], validate=True)
@@ -1505,28 +1516,56 @@ def save_images(
             if not data or len(data) > MAX_IMAGE_BYTES:
                 raise ImageGenError("Generated image is empty or too large")
             suffix = _image_extension(data, content_type)
-            final_path = final_path_base.with_suffix(suffix)
-            temp_path = final_path.with_suffix(final_path.suffix + ".part")
-            temp_path.write_bytes(data)
-            temp_path.replace(final_path)
-            paths.append(str(final_path.resolve()))
+            stage_path = stage_path_base.with_suffix(suffix)
+            temp_path = stage_path.with_suffix(stage_path.suffix + ".part")
+            try:
+                temp_path.write_bytes(data)
+                temp_path.replace(stage_path)
+            except OSError as exc:
+                temp_path.unlink(missing_ok=True)
+                raise ImageGenError(f"Unable to save generated image: {exc}") from exc
+            staged_paths.append(stage_path)
+            final_paths.append(final_path_base.with_suffix(suffix))
             continue
         elif item.get("url"):
-            temp_path = final_path_base.with_suffix(".part")
+            stage_path = stage_path_base.with_suffix(".part")
             try:
                 header, content_type = _download_image_to_path(
-                    str(item["url"]), endpoint, key, timeout, temp_path
+                    str(item["url"]), endpoint, key, timeout, stage_path
                 )
                 suffix = _image_extension(header, content_type)
-                final_path = final_path_base.with_suffix(suffix)
-                temp_path.replace(final_path)
-                paths.append(str(final_path.resolve()))
+                staged_path = stage_path.with_suffix(suffix)
+                stage_path.replace(staged_path)
+                staged_paths.append(staged_path)
+                final_paths.append(final_path_base.with_suffix(suffix))
             except Exception:
-                temp_path.unlink(missing_ok=True)
+                stage_path.unlink(missing_ok=True)
                 raise
             continue
-        else:
-            raise ImageGenError("Image item has neither url nor b64_json")
+
+    paths: list[str] = []
+    try:
+        for staged_path, final_path in zip(staged_paths, final_paths):
+            staged_path.replace(final_path)
+            paths.append(str(final_path.resolve()))
+    except OSError as exc:
+        # Remove only files from this task. Previously completed customer
+        # images and other tasks remain untouched.
+        for path in staged_paths:
+            path.unlink(missing_ok=True)
+        for path in final_paths:
+            path.unlink(missing_ok=True)
+        raise ImageGenError(f"Unable to publish generated image: {exc}") from exc
+    finally:
+        if staging_dir is not None:
+            try:
+                staging_dir.rmdir()
+            except OSError:
+                pass
+            try:
+                staging_dir.parent.rmdir()
+            except OSError:
+                pass
     return paths
 
 
@@ -1639,12 +1678,24 @@ def _cached_result_files_exist(payload: dict[str, Any]) -> bool:
 
 
 def _task_result_files(output_dir: Path, task_id: str) -> list[str]:
-    """Return only valid final images belonging to this exact task."""
+    """Return valid final images belonging to this exact task.
+
+    New tasks use unique task-id filename prefixes in the shared image folder.
+    The legacy task-directory layout remains readable for in-flight 1.8.42
+    tasks and previously delivered results.
+    """
     task_dir = output_dir.expanduser().resolve() / task_id
-    if not task_dir.is_dir():
-        return []
     files: list[str] = []
-    for path in sorted(task_dir.iterdir()):
+    if task_dir.is_dir():
+        candidates = sorted(task_dir.iterdir())
+    else:
+        prefix = f"image-{task_id}-"
+        candidates = sorted(
+            path
+            for path in output_dir.expanduser().resolve().iterdir()
+            if path.is_file() and path.name.startswith(prefix)
+        )
+    for path in candidates:
         if not path.is_file() or path.name.endswith(".part"):
             continue
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:

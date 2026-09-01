@@ -293,21 +293,37 @@ class AsyncResultRecoveryTests(unittest.TestCase):
                 [str((current_dir / "image-current.png").resolve().as_posix())],
             )
 
-    def test_save_images_publishes_under_task_directory(self) -> None:
+    def test_save_images_publishes_under_shared_image_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
             files = generate.save_images(
                 {"data": [{"b64_json": "iVBORw0KGgo="}]},
                 "https://relay.test/v1/images/generations",
                 "secret",
-                Path(directory),
+                output_dir,
                 30,
                 task_id="task-scoped-1234",
             )
             self.assertEqual(1, len(files))
-            self.assertEqual(
-                Path(files[0]).parent.name,
-                "task-scoped-1234",
-            )
+            self.assertEqual(Path(files[0]).parent, output_dir.resolve())
+            self.assertTrue(Path(files[0]).name.startswith("image-task-scoped-1234-"))
+            self.assertFalse((output_dir / "task-scoped-1234").exists())
+            self.assertFalse((output_dir / ".staging").exists())
+
+    def test_empty_image_response_does_not_create_task_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            with self.assertRaises(generate.ImageGenError):
+                generate.save_images(
+                    {"data": []},
+                    "https://relay.test/v1/images/generations",
+                    "secret",
+                    output_dir,
+                    30,
+                    task_id="task-empty-1234",
+                )
+            self.assertFalse((output_dir / "task-empty-1234").exists())
+            self.assertFalse((output_dir / ".staging").exists())
 
     def test_recovery_uses_existing_local_image_without_status_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
