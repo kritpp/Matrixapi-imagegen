@@ -257,6 +257,107 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             )
             self.assertIsNone(cached)
 
+    def test_interrupted_task_claim_returns_recovery_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            fingerprint = "r" * 64
+            record_path = generate.idempotency_record_path(output_dir, fingerprint)
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(
+                '{"version":3,"status":"in_progress",'
+                '"task_id":"task-original-1234","created_at_ms":'
+                + str(generate.time.time_ns() // 1_000_000)
+                + ',"request_started_at_ms":1}',
+                encoding="utf-8",
+            )
+            lock_path = record_path.with_suffix(".lock")
+            lock_path.write_text("999999999", encoding="ascii")
+            _record, _lock, recovery = generate.claim_idempotency(
+                output_dir, fingerprint, "task-new-5678", 1
+            )
+            self.assertIsNotNone(recovery)
+            self.assertTrue(recovery.get("_recovery_record"))
+            self.assertEqual(recovery.get("task_id"), "task-original-1234")
+
+    def test_task_result_lookup_never_uses_another_task_image(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            old_dir = output_dir / "task-old-1234"
+            current_dir = output_dir / "task-current-1234"
+            old_dir.mkdir()
+            current_dir.mkdir()
+            (old_dir / "image-old.png").write_bytes(b"old")
+            (current_dir / "image-current.png").write_bytes(b"current")
+            self.assertEqual(
+                generate._task_result_files(output_dir, "task-current-1234"),
+                [str((current_dir / "image-current.png").resolve().as_posix())],
+            )
+
+    def test_save_images_publishes_under_task_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            files = generate.save_images(
+                {"data": [{"b64_json": "iVBORw0KGgo="}]},
+                "https://relay.test/v1/images/generations",
+                "secret",
+                Path(directory),
+                30,
+                task_id="task-scoped-1234",
+            )
+            self.assertEqual(1, len(files))
+            self.assertEqual(
+                Path(files[0]).parent.name,
+                "task-scoped-1234",
+            )
+
+    def test_recovery_uses_existing_local_image_without_status_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            task_id = "task-recover-1234"
+            fingerprint = "z" * 64
+            task_dir = output_dir / task_id
+            task_dir.mkdir()
+            image = task_dir / "image-current.png"
+            image.write_bytes(b"current-image")
+            record_path = generate.idempotency_record_path(output_dir, fingerprint)
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(
+                generate.json.dumps(
+                    {
+                        "version": generate.IDEMPOTENCY_VERSION,
+                        "status": "in_progress",
+                        "task_id": task_id,
+                        "request_started_at_ms": 1,
+                        "request_context": {
+                            "mode": "edit",
+                            "model": "gpt-image-2",
+                            "size": "4K",
+                            "requested_size": "4K",
+                            "quality": "high",
+                            "aspect_ratio": "16:9",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            lock_path = record_path.with_suffix(".lock")
+            with mock.patch.object(generate, "_schedule_result_hide", return_value=False), mock.patch.object(
+                generate, "_get_image_request"
+            ) as status_get:
+                result = generate.recover_submitted_task(
+                    generate._load_idempotency_record(record_path) or {},
+                    record_path,
+                    lock_path,
+                    fingerprint,
+                    output_dir,
+                    "https://relay.test/v1/images/generations",
+                    "secret",
+                    30,
+                )
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["recovered_after_reconnect"])
+            self.assertEqual(result["preview_files"], [image.resolve().as_posix()])
+            status_get.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
