@@ -8,7 +8,9 @@ an upstream image request has completed.
 
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,26 @@ POSITIONS = {
 
 class PostprocessError(RuntimeError):
     pass
+
+
+def _hide_internal_manifest(path: Path) -> None:
+    """Keep processing metadata available to the Skill but out of Explorer."""
+    if os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        get_attributes = kernel32.GetFileAttributesW
+        set_attributes = kernel32.SetFileAttributesW
+        get_attributes.argtypes = [ctypes.c_wchar_p]
+        get_attributes.restype = ctypes.c_uint32
+        set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        set_attributes.restype = ctypes.c_int
+        attributes = get_attributes(str(path))
+        if attributes != 0xFFFFFFFF:
+            set_attributes(str(path), attributes | 0x2)
+    except (AttributeError, OSError):
+        # Visibility metadata must not fail an otherwise successful image job.
+        return
 
 
 def _pil():
@@ -262,4 +284,5 @@ def process_many(paths: list[str], output_dir: str | Path, **kwargs: Any) -> lis
         json.dumps({"tool": "Matrixapi-imagegen-local-postprocess", "items": results}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    _hide_internal_manifest(manifest_path)
     return results
