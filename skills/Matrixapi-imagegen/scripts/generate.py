@@ -36,11 +36,15 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.39"
+SKILL_VERSION = "1.8.40"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
+# Result downloads are streamed to a task-scoped .part file, so a large 8K
+# result never occupies a matching amount of memory. This is deliberately
+# separate from the 50 MiB reference-upload limit below.
+MAX_RESULT_IMAGE_BYTES = 512 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 # Keep multipart uploads below the relay's 256 MiB request limit. The margin
 # leaves room for multipart headers and prevents a proxy from cutting off a
@@ -1411,10 +1415,19 @@ def _decode_data_url(url: str) -> tuple[bytes, str]:
         raise ImageGenError("Image API returned invalid base64 image data") from exc
 
 
-def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[bytes, str]:
-    if url.startswith("data:") and ";base64," in url:
-        return _decode_data_url(url)
+def _download_image_to_path(
+    url: str,
+    endpoint: str,
+    key: str,
+    timeout: int,
+    destination: Path,
+) -> tuple[bytes, str]:
+    """Stream a result URL into ``destination`` and return its header bytes.
 
+    Task status responses remain capped separately. Completed image URLs can be
+    much larger at 8K, so read them in bounded chunks and atomically publish the
+    final result only after the transfer and image signature validation succeed.
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ImageGenError("Image API returned an unsupported image URL")
@@ -1425,7 +1438,29 @@ def _download_image(url: str, endpoint: str, key: str, timeout: int) -> tuple[by
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             content_type = response.headers.get("Content-Type", "")
-            return _read_limited(response, MAX_IMAGE_BYTES), content_type
+            content_length = response.headers.get("Content-Length", "").strip()
+            if content_length:
+                try:
+                    if int(content_length) > MAX_RESULT_IMAGE_BYTES:
+                        raise ImageGenError("Generated image exceeds the 512 MB delivery limit")
+                except ValueError:
+                    pass
+            total = 0
+            header = b""
+            with destination.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_RESULT_IMAGE_BYTES:
+                        raise ImageGenError("Generated image exceeds the 512 MB delivery limit")
+                    if len(header) < 64:
+                        header += chunk[: 64 - len(header)]
+                    handle.write(chunk)
+            if total == 0:
+                raise ImageGenError("Generated image is empty")
+            return header, content_type
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ImageGenError(f"Unable to download the generated image: {exc}") from exc
 
@@ -1446,26 +1481,37 @@ def save_images(
         if not isinstance(item, dict):
             raise ImageGenError("Image API returned an invalid image item")
         content_type = ""
+        final_path_base = output_dir / f"image-{stamp}-{run_id}-{index}"
         if item.get("b64_json"):
             try:
                 data = base64.b64decode(item["b64_json"], validate=True)
             except (binascii.Error, ValueError, TypeError) as exc:
                 raise ImageGenError("Image API returned invalid base64 image data") from exc
+            if not data or len(data) > MAX_IMAGE_BYTES:
+                raise ImageGenError("Generated image is empty or too large")
+            suffix = _image_extension(data, content_type)
+            final_path = final_path_base.with_suffix(suffix)
+            temp_path = final_path.with_suffix(final_path.suffix + ".part")
+            temp_path.write_bytes(data)
+            temp_path.replace(final_path)
+            paths.append(str(final_path.resolve()))
+            continue
         elif item.get("url"):
-            data, content_type = _download_image(
-                str(item["url"]), endpoint, key, timeout
-            )
+            temp_path = final_path_base.with_suffix(".part")
+            try:
+                header, content_type = _download_image_to_path(
+                    str(item["url"]), endpoint, key, timeout, temp_path
+                )
+                suffix = _image_extension(header, content_type)
+                final_path = final_path_base.with_suffix(suffix)
+                temp_path.replace(final_path)
+                paths.append(str(final_path.resolve()))
+            except Exception:
+                temp_path.unlink(missing_ok=True)
+                raise
+            continue
         else:
             raise ImageGenError("Image item has neither url nor b64_json")
-
-        if not data or len(data) > MAX_IMAGE_BYTES:
-            raise ImageGenError("Generated image is empty or too large")
-        suffix = _image_extension(data, content_type)
-        final_path = output_dir / f"image-{stamp}-{run_id}-{index}{suffix}"
-        temp_path = final_path.with_suffix(final_path.suffix + ".part")
-        temp_path.write_bytes(data)
-        temp_path.replace(final_path)
-        paths.append(str(final_path.resolve()))
     return paths
 
 
