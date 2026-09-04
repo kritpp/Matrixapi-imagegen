@@ -296,15 +296,32 @@ class AsyncResultRecoveryTests(unittest.TestCase):
     def test_save_images_publishes_under_shared_image_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
+            image_data = (
+                b"\x89PNG\r\n\x1a\n"
+                + b"\x00\x00\x00\rIHDR"
+                + (1672).to_bytes(4, "big")
+                + (941).to_bytes(4, "big")
+            )
+            actual_sizes = []
             files = generate.save_images(
-                {"data": [{"b64_json": "iVBORw0KGgo="}]},
+                {
+                    "data": [
+                        {
+                            "b64_json": generate.base64.b64encode(image_data).decode(
+                                "ascii"
+                            )
+                        }
+                    ]
+                },
                 "https://relay.test/v1/images/generations",
                 "secret",
                 output_dir,
                 30,
                 task_id="task-scoped-1234",
+                actual_sizes=actual_sizes,
             )
             self.assertEqual(1, len(files))
+            self.assertEqual(["1672×941"], actual_sizes)
             self.assertEqual(Path(files[0]).parent, output_dir.resolve())
             self.assertTrue(Path(files[0]).name.startswith("image-task-scoped-1234-"))
             self.assertFalse((output_dir / "task-scoped-1234").exists())
@@ -333,7 +350,12 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             task_dir = output_dir / task_id
             task_dir.mkdir()
             image = task_dir / "image-current.png"
-            image.write_bytes(b"current-image")
+            image.write_bytes(
+                b"\x89PNG\r\n\x1a\n"
+                + b"\x00\x00\x00\rIHDR"
+                + (1672).to_bytes(4, "big")
+                + (941).to_bytes(4, "big")
+            )
             record_path = generate.idempotency_record_path(output_dir, fingerprint)
             record_path.parent.mkdir(parents=True, exist_ok=True)
             record_path.write_text(
@@ -372,6 +394,10 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertTrue(result["recovered_after_reconnect"])
             self.assertEqual(result["preview_files"], [image.resolve().as_posix()])
+            self.assertEqual(
+                result["display_summary"],
+                "实际尺寸：1672×941｜比例：16:9｜画质：high",
+            )
             status_get.assert_not_called()
 
 

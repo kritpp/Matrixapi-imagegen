@@ -62,7 +62,7 @@ Generate or edit images with the bundled script and show the saved result to the
    `![generated image](C:/.../image.png)`
    `[点击打开或下载原图](C:/.../image.png)`
    Then print the terminal result's `display_summary` on its own line directly
-   below the image links (for example, `尺寸：4K｜实际像素：3840x2160｜比例：16:9｜画质：high`).
+   below the image links (for example, `实际尺寸：1672×941｜比例：16:9｜画质：high`).
    This is local metadata formatting only; never issue another API request to
    obtain or verify it. Sequence and story runner events carry the same field
    per item/page and must display it with that item/page.

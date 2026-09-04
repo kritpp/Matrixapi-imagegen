@@ -17,7 +17,13 @@ SPEC.loader.exec_module(GENERATE)
 
 
 class _ImageHandler(http.server.BaseHTTPRequestHandler):
-    payload = b"\x89PNG\r\n\x1a\n" + b"x" * (2 * 1024 * 1024)
+    payload = (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + (1672).to_bytes(4, "big")
+        + (941).to_bytes(4, "big")
+        + b"x" * (2 * 1024 * 1024)
+    )
 
     def do_GET(self):
         self.send_response(200)
@@ -38,14 +44,17 @@ class StreamedImageDeliveryTest(unittest.TestCase):
         thread.start()
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
+                actual_sizes = []
                 files = GENERATE.save_images(
                     {"data": [{"url": f"http://127.0.0.1:{server.server_address[1]}/image"}]},
                     "http://127.0.0.1:3000/v1/images/generations",
                     "",
                     Path(temp_dir),
                     30,
+                    actual_sizes=actual_sizes,
                 )
                 self.assertEqual(1, len(files))
+                self.assertEqual(["1672×941"], actual_sizes)
                 output = Path(files[0])
                 self.assertEqual(_ImageHandler.payload, output.read_bytes())
                 self.assertFalse(list(Path(temp_dir).glob("*.part")))

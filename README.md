@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.43**
+Current release: **v1.8.88**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.43](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.43.zip)
+[下载 Matrixapi-imagegen v1.8.88](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.88.zip)
 
 解压后按系统运行安装程序：
 
@@ -26,7 +26,7 @@ Current release: **v1.8.43**
 
 8K 等大结果采用流式保存：状态查询只接收小型任务 JSON，完成后的图片分块写入临时文件并校验后原子保存。不会因图片大于旧的内存读取上限而重新提交、重复扣费或降低请求尺寸。
 
-成功返回会在图片链接下显示本次实际使用的尺寸档位、像素、比例和画质；这只是本地回显，不增加任何上游请求或等待时间。
+成功返回会在图片链接下显示最终图片的真实像素尺寸、比例和画质；这只是本地回显，不增加任何上游请求或等待时间。
 
 安装位置：
 

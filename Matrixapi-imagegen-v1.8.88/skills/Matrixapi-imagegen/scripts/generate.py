@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.43"
+SKILL_VERSION = "1.8.88"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -46,6 +46,7 @@ MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 # separate from the 50 MiB reference-upload limit below.
 MAX_RESULT_IMAGE_BYTES = 512 * 1024 * 1024
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
+MAX_IMAGE_HEADER_BYTES = 1024 * 1024
 # Keep multipart uploads below the relay's 256 MiB request limit. The margin
 # leaves room for multipart headers and prevents a proxy from cutting off a
 # large request after the upstream task has already been billed.
@@ -1408,6 +1409,30 @@ def _image_extension(data: bytes, content_type: str = "") -> str:
     raise ImageGenError("The API returned data that is not a supported image")
 
 
+def _actual_size_from_image_bytes(
+    data: bytes, content_type: str = "", label: str = "Generated image"
+) -> str:
+    suffix = _image_extension(data, content_type)
+    mime = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+    }[suffix]
+    width, height = _dimensions_from_image_bytes(data, mime, label)
+    return f"{width}×{height}"
+
+
+def _actual_size_from_image_file(path_value: str) -> str:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(MAX_IMAGE_HEADER_BYTES)
+        return _actual_size_from_image_bytes(header, label="Generated image")
+    except (ImageGenError, OSError):
+        return ""
+
+
 def _decode_data_url(url: str) -> tuple[bytes, str]:
     header, encoded = url.split(",", 1)
     try:
@@ -1456,8 +1481,8 @@ def _download_image_to_path(
                     total += len(chunk)
                     if total > MAX_RESULT_IMAGE_BYTES:
                         raise ImageGenError("Generated image exceeds the 512 MB delivery limit")
-                    if len(header) < 64:
-                        header += chunk[: 64 - len(header)]
+                    if len(header) < MAX_IMAGE_HEADER_BYTES:
+                        header += chunk[: MAX_IMAGE_HEADER_BYTES - len(header)]
                     handle.write(chunk)
             if total == 0:
                 raise ImageGenError("Generated image is empty")
@@ -1473,6 +1498,7 @@ def save_images(
     output_dir: Path,
     timeout: int,
     task_id: str | None = None,
+    actual_sizes: list[str] | None = None,
 ) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1502,6 +1528,7 @@ def save_images(
 
     staged_paths: list[Path] = []
     final_paths: list[Path] = []
+    staged_actual_sizes: list[str] = []
 
     for index, item in enumerate(items, start=1):
         content_type = ""
@@ -1516,6 +1543,10 @@ def save_images(
             if not data or len(data) > MAX_IMAGE_BYTES:
                 raise ImageGenError("Generated image is empty or too large")
             suffix = _image_extension(data, content_type)
+            try:
+                actual_size = _actual_size_from_image_bytes(data, content_type)
+            except ImageGenError:
+                actual_size = ""
             stage_path = stage_path_base.with_suffix(suffix)
             temp_path = stage_path.with_suffix(stage_path.suffix + ".part")
             try:
@@ -1526,6 +1557,7 @@ def save_images(
                 raise ImageGenError(f"Unable to save generated image: {exc}") from exc
             staged_paths.append(stage_path)
             final_paths.append(final_path_base.with_suffix(suffix))
+            staged_actual_sizes.append(actual_size)
             continue
         elif item.get("url"):
             stage_path = stage_path_base.with_suffix(".part")
@@ -1534,10 +1566,15 @@ def save_images(
                     str(item["url"]), endpoint, key, timeout, stage_path
                 )
                 suffix = _image_extension(header, content_type)
+                try:
+                    actual_size = _actual_size_from_image_bytes(header, content_type)
+                except ImageGenError:
+                    actual_size = ""
                 staged_path = stage_path.with_suffix(suffix)
                 stage_path.replace(staged_path)
                 staged_paths.append(staged_path)
                 final_paths.append(final_path_base.with_suffix(suffix))
+                staged_actual_sizes.append(actual_size)
             except Exception:
                 stage_path.unlink(missing_ok=True)
                 raise
@@ -1566,6 +1603,8 @@ def save_images(
                 staging_dir.parent.rmdir()
             except OSError:
                 pass
+    if actual_sizes is not None:
+        actual_sizes.extend(staged_actual_sizes)
     return paths
 
 
@@ -1940,6 +1979,7 @@ def _recovery_payload(
     requested_size = str(context.get("requested_size") or size)
     quality = str(context.get("quality") or "auto")
     aspect_ratio = str(context.get("aspect_ratio") or "auto")
+    actual_size = _actual_size_from_image_file(files[0]) if files else ""
     previews = preview_paths(files)
     return {
         "ok": True,
@@ -1958,7 +1998,7 @@ def _recovery_payload(
         "aspect_ratio": aspect_ratio,
         "aspect_ratio_source": str(context.get("aspect_ratio_source") or "model_default"),
         "display_summary": format_display_summary(
-            requested_size, size, quality, aspect_ratio
+            requested_size, actual_size, quality, aspect_ratio
         ),
         "async": bool(context.get("async", True)),
         "recovered_after_reconnect": True,
@@ -2048,6 +2088,24 @@ def emit_reused_success(
         payload.pop(key, None)
     payload["idempotency_reused"] = True
     payload["reused_from_task_id"] = reused_from_task_id
+    if not str(payload.get("display_summary") or "").startswith("实际尺寸："):
+        candidates = (
+            payload.get("processed_files")
+            or payload.get("preview_files")
+            or payload.get("files")
+            or []
+        )
+        actual_size = (
+            _actual_size_from_image_file(str(candidates[0]))
+            if isinstance(candidates, list) and candidates
+            else ""
+        )
+        payload["display_summary"] = format_display_summary(
+            str(payload.get("requested_size") or payload.get("size") or ""),
+            actual_size,
+            str(payload.get("quality") or "auto"),
+            str(payload.get("aspect_ratio") or "auto"),
+        )
     return emit_success(payload, output_dir, task_id, request_started_at_ms)
 
 
@@ -2300,11 +2358,10 @@ def format_display_summary(
     aspect_ratio: str,
 ) -> str:
     """Build the local-only metadata line shown beside a delivered image."""
-    requested = str(requested_size or actual_size or "auto").strip() or "auto"
-    actual = str(actual_size or "").strip()
-    parts = [f"尺寸：{requested}"]
-    if actual and actual != requested:
-        parts.append(f"实际像素：{actual}")
+    actual = str(actual_size or "").strip().replace("X", "×").replace("x", "×")
+    if not actual or actual.upper() in SIZE_ALIASES:
+        actual = "未知"
+    parts = [f"实际尺寸：{actual}"]
     parts.append(f"比例：{str(aspect_ratio or 'auto').strip() or 'auto'}")
     parts.append(f"画质：{str(quality or 'auto').strip() or 'auto'}")
     return "｜".join(parts)
@@ -3054,6 +3111,7 @@ def main() -> int:
             result = resolve_image_task_response(
                 result, generation_url, key, args.timeout, async_mode
             )
+        saved_actual_sizes: list[str] = []
         files = save_images(
             result,
             result_endpoint,
@@ -3061,6 +3119,7 @@ def main() -> int:
             output_dir,
             args.timeout,
             task_id=task_id,
+            actual_sizes=saved_actual_sizes,
         )
         original_files = preview_paths(files)
         processed_files = files.copy()
@@ -3100,6 +3159,13 @@ def main() -> int:
                 return 1
             processed_files = [item["output"] for item in processed]
             postprocess_manifest = str(Path(processed_dir).resolve() / "postprocess-manifest.json")
+            actual_size = (
+                f"{processed[0]['output_width']}×{processed[0]['output_height']}"
+                if processed
+                else ""
+            )
+        else:
+            actual_size = saved_actual_sizes[0] if saved_actual_sizes else ""
         preview_files = preview_paths(processed_files)
         download_files = preview_files.copy()
         story_payload = None
@@ -3110,7 +3176,7 @@ def main() -> int:
             story_payload = story_result_payload(story_path, story_state)
         display_summary = format_display_summary(
             requested_size=requested_size,
-            actual_size=size,
+            actual_size=actual_size,
             quality=quality,
             aspect_ratio=aspect_ratio,
         )
