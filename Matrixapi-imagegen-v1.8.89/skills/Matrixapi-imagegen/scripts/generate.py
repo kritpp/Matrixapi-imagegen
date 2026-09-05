@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.88"
+SKILL_VERSION = "1.8.89"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -1631,19 +1631,16 @@ def result_record_path(output_dir: Path, task_id: str) -> Path:
 
 def _idempotency_scope(task_id: str) -> str:
     thread_id = os.environ.get("CODEX_THREAD_ID", "").strip()
-    session_id = os.environ.get("CODEX_SESSION_ID", "").strip()
     if thread_id:
         return f"thread:{thread_id}"
-    if session_id:
-        return f"session:{session_id}"
-    # Codex may omit both identifiers.  Never fall back to task_id here:
-    # retries legitimately receive a fresh task id, and using it would make
-    # an identical paid request look new and defeat duplicate-charge guards.
-    # The request body and ordered reference digests already distinguish
-    # different requests; a conservative process-wide scope is safest when
-    # no conversation identifier is available.  ``task_id`` remains part of
-    # the result record, but not the idempotency fingerprint.
-    return "process"
+    # CODEX_SESSION_ID identifies the desktop/runtime session and may contain
+    # multiple independent conversations.  It is therefore unsafe for result
+    # reuse: a new conversation must never receive an older conversation's
+    # preview files merely because the prompt is identical.  When Codex does
+    # not provide a thread id, bind the ledger to this exact task instead.
+    # Reconnects that reuse the same task id remain recoverable; a fresh task
+    # id is always a fresh generation.
+    return f"task:{task_id}"
 
 
 def _local_reference_fingerprint(

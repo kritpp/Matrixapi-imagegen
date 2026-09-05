@@ -125,10 +125,72 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             second.write_bytes(content)
             one = {"prompt": "same", "local_references": generate._local_reference_fingerprint([str(first)], None)}
             two = {"prompt": "same", "local_references": generate._local_reference_fingerprint([str(second)], None)}
+            # A stable thread keeps retries deduplicated even when the caller
+            # has to choose a fresh task id after reconnecting.
+            with mock.patch.dict(
+                generate.os.environ,
+                {"CODEX_THREAD_ID": "thread-test-1234", "CODEX_SESSION_ID": "session-test"},
+                clear=True,
+            ):
+                self.assertEqual(
+                    generate.request_fingerprint("task-11111111", one),
+                    generate.request_fingerprint("task-22222222", two),
+                )
+
+    def test_new_tasks_are_isolated_when_thread_id_is_missing(self) -> None:
+        request = {"prompt": "same", "model": "gpt-image-2"}
+        # A desktop session can contain several conversations.  Without a
+        # thread id, a new task must not inherit another task's result.
+        with mock.patch.dict(
+            generate.os.environ,
+            {"CODEX_SESSION_ID": "shared-runtime-session"},
+            clear=True,
+        ):
+            first = generate.request_fingerprint("task-11111111", request)
+            second = generate.request_fingerprint("task-22222222", request)
+        self.assertNotEqual(first, second)
+
+    def test_same_task_remains_recoverable_without_thread_id(self) -> None:
+        request = {"prompt": "same", "model": "gpt-image-2"}
+        with mock.patch.dict(generate.os.environ, {}, clear=True):
             self.assertEqual(
-                generate.request_fingerprint("task-11111111", one),
-                generate.request_fingerprint("task-22222222", two),
+                generate.request_fingerprint("task-11111111", request),
+                generate.request_fingerprint("task-11111111", request),
             )
+
+    def test_missing_thread_cannot_reuse_another_task_success(self) -> None:
+        request = {"prompt": "same", "model": "gpt-image-2"}
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            image = output_dir / "image-task-11111111.png"
+            image.write_bytes(b"image")
+            payload = {
+                "ok": True,
+                "task_id": "task-11111111",
+                "preview_files": [image.resolve().as_posix()],
+                "download_files": [image.resolve().as_posix()],
+            }
+            with mock.patch.dict(generate.os.environ, {}, clear=True), mock.patch.object(
+                generate, "_schedule_result_hide", return_value=False
+            ):
+                first_fingerprint = generate.request_fingerprint("task-11111111", request)
+                record, lock, cached = generate.claim_idempotency(
+                    output_dir, first_fingerprint, "task-11111111", 1
+                )
+                self.assertIsNone(cached)
+                generate.finish_idempotency(
+                    record,
+                    lock,
+                    first_fingerprint,
+                    "task-11111111",
+                    payload=payload,
+                )
+                second_fingerprint = generate.request_fingerprint("task-22222222", request)
+                record2, lock2, cached2 = generate.claim_idempotency(
+                    output_dir, second_fingerprint, "task-22222222", 1
+                )
+                self.assertIsNone(cached2)
+                lock2.unlink(missing_ok=True)
 
     def test_transient_status_error_retries_get_without_resubmitting(self) -> None:
         responses = iter(

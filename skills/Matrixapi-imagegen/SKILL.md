@@ -30,13 +30,38 @@ Generate or edit images with the bundled script and show the saved result to the
    ```
 
    For URL-based reference editing, repeat `--reference-url "https://..."` up to 16 times instead of using `--image`. For masked local editing, add `--mask "<mask path>"` only after the model channel has confirmed mask support. On the pinned relay, use ordinary reference editing instead; describe the target area and blending constraints in the prompt. Keep `n` at 1 unless the user explicitly requests variants; the maximum is 4.
-   Generate a fresh `--task-id` before every command and never reuse it. Reference images are scoped to the current request, not the whole conversation. Do not pass every image mentioned earlier. For a new page or variant, use the explicitly requested current-turn references and, only when the request is an edit, the exact latest generated output from this conversation; do not append older generated 4K outputs to the next request. For a repeated edit, replace the previous input set with the exact latest output unless the user explicitly asks to keep another reference.
+   Generate a fresh `--task-id` for every new generation. If a command is
+   interrupted before its terminal result is written, retry/reconnect with the
+   **same** task id so the ledger can recover the original handoff; do not
+   invent a new task id to recover it. If a task result JSON already exists,
+   do not rerun the task: use the original command's result or report that the
+   handoff needs recovery. Reference images are scoped to the current request, not the
+   whole conversation. Do not pass every image mentioned earlier. For a new
+   page or variant, use the explicitly requested current-turn references and,
+   only when the request is an edit, the exact latest generated output from
+   this conversation; do not append older generated 4K outputs to the next
+   request. For a repeated edit, replace the previous input set with the
+   exact latest output unless the user explicitly asks to keep another
+   reference.
    For GPT Image 2 and GPT Image 2 Pro, the script omits the generic `n=1` field from the outbound request because the pinned model does not guarantee that parameter.
    For long 2K/4K/8K generation requests or URL-reference edits, add `--async`; the script submits the task and polls `/v1/status/{task_id}` for up to the command's 600-second default timeout. Some routes also acknowledge ordinary 1K requests asynchronously: whenever a successful response contains `id`/`task_id` but no usable image data, the script automatically polls that exact task even if `--async` was not requested. This only adds free status GETs and never repeats the paid image POST. Local GPT Image 2 edits keep native 1K/2K/4K/8K pixels. When a local 2K/4K/8K edit has at least 6 references or the combined source files are at least 48 MiB, the script automatically uses the relay's async JSON-reference path; smaller edits stay synchronous. This avoids losing a long synchronous response after the model has completed the billed task. The automatic path does not downscale or resubmit on timeout, and a failed task is reported once. The relay rejects a local multipart request above the 192 MiB safety threshold before sending it. Add `--stream` only when the caller can consume SSE events. `--webhook URL` and `--metadata '{"order_id":"..."}'` require explicit `--async`.
 
    **Running-command rule:** an async image command commonly outlives the shell tool's first yield. If the command returns a running `session_id`, cell ID, or equivalent "still running" state instead of a process exit code and terminal JSON, immediately wait/poll that exact execution session (for example with the shell session's wait or stdin-poll operation) and continue until it exits. A running session is not an error and is not a user-facing result. Do not say that the model returned no confirmed result, do not end the Codex turn, do not launch a second generation, and do not change channels while the original process is alive. Status polling is free and the original paid submit must occur exactly once.
 
    **Reconnect recovery rule:** before the paid POST, the script persists the request context and task id in its hidden idempotency ledger. Immediately after a successful submit it persists the upstream task id and status base URL. If Codex is interrupted and reconnects, the next identical invocation first acquires the original task lock and checks the exact task-id image filename or polls the saved upstream task id; it never submits a second POST. A locally completed image is authoritative even when the upstream status lookup later returns 404. New result images are stored directly in the shared `generated_images/Matrixapi-imagegen` folder with a unique task-id filename; incomplete downloads stay in hidden `.staging` and are never exposed as empty task folders. Legacy task directories from older Skills remain readable for recovery. Temporary state is removed only after the current result has been emitted; delivered image files remain available for the download link.
+
+   **New-conversation isolation (hard rule):** a new conversation or a new
+   generation must never use an old `preview_files` path. Do not list, search,
+   or inspect `generated_images`, result JSON files, clipboard folders, or
+   previous task plans to find a result. Use only the `preview_files` and
+   `download_files` returned by the command currently running, or the exact
+   prior path already returned in this same conversation when the user
+   explicitly asks to edit/recover that image. If a command reports
+   `idempotency_reused`, render it only when the user explicitly asked to
+   recover the same task; otherwise stop and report the mismatch instead of
+   presenting that file as the new result. The script trusts only
+   `CODEX_THREAD_ID` as a conversation boundary; when it is unavailable,
+   idempotency is bound to the exact task id, not the shared desktop session.
 
    When the user explicitly requests N ordered outputs (for example all 8 named roles in a document), N is a completion requirement: do not stop after an arbitrary subset and do not ask which item to begin with. Resolve the supplied document order, use its first item when no order is written, and submit every requested item exactly once. For independent roles/assets, create the N exact command argument lists in a temporary UTF-8 JSON plan and run `sequence_runner.py --plan-file <plan>` once. It executes the full list in one local process, flushes a result event after each image, stops only on an actual failed item, and never submits a completed item twice.
 
@@ -212,14 +237,15 @@ not an uncertain record and is deleted before a later explicit new task; never
 silently treat “再生成” as a cached-result lookup or a historical refusal.
 
 Each API request is keyed by a deterministic fingerprint containing the current
-Codex thread, prompt, model, mode, size, quality, count, and the ordered
-reference-image content (content digests, not temporary clipboard paths). The
-script's existing idempotency record and lock are still required for
-crash/retry protection; only the user-intent routing above decides whether a
-fresh task is allowed. If an async status GET briefly returns 404/5xx or a
-relay wraps the completed image under `result`, `output`, `task`, `images`, or
-`files`, the script normalizes the response and retries only the free status
-GET. It must never resubmit the billed image request.
+Codex thread (or, when no thread id is available, the exact task id), prompt,
+model, mode, size, quality, count, and the ordered reference-image content
+(content digests, not temporary clipboard paths). The script's existing
+idempotency record and lock are still required for crash/retry protection;
+only the user-intent routing above decides whether a fresh task is allowed. If
+an async status GET briefly returns 404/5xx or a relay wraps the completed image
+under `result`, `output`, `task`, `images`, or `files`, the script normalizes
+the response and retries only the free status GET. It must never resubmit the
+billed image request.
 
 When the user explicitly asks to update Matrixapi-imagegen, run exactly once:
 
