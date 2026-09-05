@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hide a delivered result JSON in Windows Explorer after a short delay."""
+"""Hide or remove transient Matrixapi task state after a short delay."""
 
 from __future__ import annotations
 
@@ -30,16 +30,36 @@ def hide_file(path: Path) -> bool:
     return bool(set_attributes(str(path), attributes | FILE_ATTRIBUTE_HIDDEN))
 
 
+def remove_file(path: Path) -> bool:
+    """Remove one exact transient file and prune its empty state directory."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    if path.parent.name in {".idempotency", ".stories", ".handoff"}:
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("path", type=Path)
+    parser.add_argument("paths", type=Path, nargs="+")
     parser.add_argument("--delay-ms", type=int, default=10_000)
+    parser.add_argument("--delete", action="store_true")
     args = parser.parse_args()
     if args.delay_ms < 0 or args.delay_ms > 60_000:
         parser.error("--delay-ms must be between 0 and 60000")
     if args.delay_ms:
         time.sleep(args.delay_ms / 1000)
-    hide_file(args.path.expanduser().resolve())
+    for value in args.paths:
+        path = value.expanduser().resolve()
+        if args.delete:
+            remove_file(path)
+        else:
+            hide_file(path)
     return 0
 
 

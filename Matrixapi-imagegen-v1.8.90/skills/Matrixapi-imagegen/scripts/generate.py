@@ -36,10 +36,11 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.89"
+SKILL_VERSION = "1.8.90"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
+RESULT_CLEANUP_DELAY_MS = 1_000
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 # Result downloads are streamed to a task-scoped .part file, so a large 8K
 # result never occupies a matching amount of memory. This is deliberately
@@ -64,11 +65,11 @@ AUTO_ASYNC_REFERENCE_COUNT = 6
 AUTO_ASYNC_REFERENCE_BYTES = 48 * 1024 * 1024
 STORY_STATE_VERSION = 1
 MAX_STORY_PAGES = 20
-# Version 3 adds durable submission metadata and task-scoped result paths.
-# Version 2 ledgers are still accepted for in-flight recovery; older ledgers
-# could contain a stale ``uncertain`` 503 and are invalidated.
-IDEMPOTENCY_VERSION = 3
-RECOVERABLE_IDEMPOTENCY_VERSIONS = {2, IDEMPOTENCY_VERSION}
+# Version 4 binds every request to its exact task id and keeps complete
+# recovery metadata for outcomes that are genuinely unknown. Versions 2/3
+# remain readable only so an interrupted older task can be recovered safely.
+IDEMPOTENCY_VERSION = 4
+RECOVERABLE_IDEMPOTENCY_VERSIONS = {2, 3, IDEMPOTENCY_VERSION}
 IDEMPOTENCY_TTL_MS = 15 * 60 * 1000
 IDEMPOTENCY_WAIT_INTERVAL_SECONDS = 0.2
 # The pinned GPT Image 2 routes accept native 4K edits. Older relays can still
@@ -85,11 +86,10 @@ MASK_SUPPORT_ENV = "IMAGEGEN_MASK_SUPPORT"
 class ImageGenError(RuntimeError):
     """A sanitized image error with transport metadata for safe recovery.
 
-    Transient HTTP failures returned before a usable result (notably 503)
-    must not be written as an ``uncertain`` idempotency result.  Otherwise a
-    later, healthy request can replay the old error instead of querying the
-    provider again.  Network/time-out failures after submission remain
-    uncertain and continue to protect against duplicate paid submissions.
+    HTTP 408/5xx and transport failures at the submit boundary can arrive
+    after the upstream accepted a paid request. They remain ``uncertain`` and
+    fail closed for that exact task id. Explicit non-timeout 4xx responses are
+    terminal for the current task.
     """
 
     def __init__(
@@ -98,10 +98,14 @@ class ImageGenError(RuntimeError):
         *,
         status_code: int | None = None,
         retryable: bool = False,
+        known_terminal: bool = False,
+        request_may_have_been_sent: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.known_terminal = known_terminal
+        self.request_may_have_been_sent = request_may_have_been_sent
 
 
 CONTENT_POLICY_MARKERS = (
@@ -984,17 +988,29 @@ def _post_image_request(
             raw = _read_limited(response, MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         detail = _safe_http_detail(exc, key)
-        # A gateway/rate-limit 5xx/429 is a request-scoped upstream failure.
-        # Do not cache it as an unknown paid outcome: the next request must
-        # perform a fresh status check instead of replaying this error.
+        ambiguous_submit = exc.code == 408 or 500 <= exc.code <= 599
+        # A gateway can return 408/5xx after the paid request reached the
+        # upstream. Keep the exact task fail-closed; explicit other 4xx
+        # responses (including 429) are terminal for this attempt.
         raise ImageGenError(
             _format_upstream_error(detail, exc.code),
             status_code=exc.code,
-            retryable=exc.code in {408, 425, 429, 500, 502, 503, 504},
+            retryable=exc.code in {408, 425, 429} or 500 <= exc.code <= 599,
+            known_terminal=not ambiguous_submit,
+            request_may_have_been_sent=ambiguous_submit,
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ImageGenError(f"Image API request failed: {exc}") from exc
-    return _parse_api_response(raw)
+        raise ImageGenError(
+            f"Image API request failed: {exc}", request_may_have_been_sent=True
+        ) from exc
+    except ImageGenError as exc:
+        exc.request_may_have_been_sent = True
+        raise
+    try:
+        return _parse_api_response(raw)
+    except ImageGenError as exc:
+        exc.request_may_have_been_sent = True
+        raise
 
 
 def _option_fields(
@@ -1174,7 +1190,9 @@ def wait_for_task(
                 if isinstance(reason, (dict, list))
                 else str(reason)
             )
-            raise ImageGenError(_format_upstream_error(reason_text))
+            raise ImageGenError(
+                _format_upstream_error(reason_text), known_terminal=True
+            )
         # Results are delivered as soon as the relay reports completion. A
         # one-second interval avoids the old multi-second handoff delay while
         # keeping a single status request in flight.
@@ -1316,6 +1334,11 @@ def call_edit_api(
 ) -> dict[str, Any]:
     if not image_paths:
         raise ImageGenError("At least one --image file is required for editing")
+    if count != 1 and model == "gpt-image-2":
+        raise ImageGenError(
+            "gpt-image-2 local edits support one output per request; "
+            "use separate fresh task ids for variants"
+        )
     if len(image_paths) > MAX_INPUT_IMAGES:
         raise ImageGenError(f"At most {MAX_INPUT_IMAGES} input images are supported")
     total_input_bytes = _input_image_bytes(image_paths, mask_path)
@@ -1334,10 +1357,9 @@ def call_edit_api(
         ("size", size),
     ]
     # The pinned GPT Image 2 contract does not guarantee the generic `n`
-    # parameter. A single edit is the normal skill path, so omit n=1 even
-    # before the relay's multipart-to-JSON conversion. Other image models keep
-    # the legacy multipart count behavior for compatibility.
-    if count != 1 and model not in {"gpt-image-2"}:
+    # parameter. A single edit is the only supported local GPT Image 2 path.
+    # Other image models keep the legacy multipart count behavior.
+    if count != 1:
         fields.append(("n", str(count)))
     if options:
         fields.extend(options.items())
@@ -1425,6 +1447,15 @@ def _actual_size_from_image_bytes(
 
 def _actual_size_from_image_file(path_value: str) -> str:
     path = Path(path_value).expanduser().resolve()
+    if path.suffix.lower() == ".avif":
+        try:
+            from PIL import Image
+
+            with Image.open(path) as image:
+                width, height = image.size
+            return f"{width}×{height}" if width > 0 and height > 0 else ""
+        except (ImportError, OSError, ValueError):
+            return ""
     try:
         with path.open("rb") as handle:
             header = handle.read(MAX_IMAGE_HEADER_BYTES)
@@ -1498,6 +1529,8 @@ def save_images(
     output_dir: Path,
     timeout: int,
     task_id: str | None = None,
+    task_fingerprint: str | None = None,
+    expected_count: int | None = None,
     actual_sizes: list[str] | None = None,
 ) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1506,6 +1539,10 @@ def save_images(
     items = result.get("data") or result.get("results")
     if not isinstance(items, list) or not items:
         raise ImageGenError("Image API returned no image data")
+    if expected_count is not None and len(items) != expected_count:
+        raise ImageGenError(
+            f"Image API returned {len(items)} images; expected {expected_count}"
+        )
 
     # Validate the complete response before creating any task-specific path.
     # This prevents empty customer-visible directories when a relay returns an
@@ -1530,68 +1567,81 @@ def save_images(
     final_paths: list[Path] = []
     staged_actual_sizes: list[str] = []
 
-    for index, item in enumerate(items, start=1):
-        content_type = ""
-        prefix = f"image-{task_id}-" if task_id else "image-"
-        final_path_base = output_dir / f"{prefix}{stamp}-{run_id}-{index}"
-        stage_path_base = staging_dir / final_path_base.name if staging_dir else final_path_base
-        if item.get("b64_json"):
-            try:
-                data = base64.b64decode(item["b64_json"], validate=True)
-            except (binascii.Error, ValueError, TypeError) as exc:
-                raise ImageGenError("Image API returned invalid base64 image data") from exc
-            if not data or len(data) > MAX_IMAGE_BYTES:
-                raise ImageGenError("Generated image is empty or too large")
-            suffix = _image_extension(data, content_type)
-            try:
-                actual_size = _actual_size_from_image_bytes(data, content_type)
-            except ImageGenError:
-                actual_size = ""
-            stage_path = stage_path_base.with_suffix(suffix)
-            temp_path = stage_path.with_suffix(stage_path.suffix + ".part")
-            try:
-                temp_path.write_bytes(data)
-                temp_path.replace(stage_path)
-            except OSError as exc:
-                temp_path.unlink(missing_ok=True)
-                raise ImageGenError(f"Unable to save generated image: {exc}") from exc
-            staged_paths.append(stage_path)
-            final_paths.append(final_path_base.with_suffix(suffix))
-            staged_actual_sizes.append(actual_size)
-            continue
-        elif item.get("url"):
-            stage_path = stage_path_base.with_suffix(".part")
-            try:
-                header, content_type = _download_image_to_path(
-                    str(item["url"]), endpoint, key, timeout, stage_path
-                )
-                suffix = _image_extension(header, content_type)
+    try:
+        for index, item in enumerate(items, start=1):
+            content_type = ""
+            if task_id and task_fingerprint:
+                prefix = _task_image_prefix(task_id, task_fingerprint)
+            else:
+                prefix = f"image-{task_id}-" if task_id else "image-"
+            final_path_base = output_dir / f"{prefix}{stamp}-{run_id}-{index}"
+            stage_path_base = (
+                staging_dir / final_path_base.name if staging_dir else final_path_base
+            )
+            if item.get("b64_json"):
                 try:
-                    actual_size = _actual_size_from_image_bytes(header, content_type)
+                    data = base64.b64decode(item["b64_json"], validate=True)
+                except (binascii.Error, ValueError, TypeError) as exc:
+                    raise ImageGenError(
+                        "Image API returned invalid base64 image data"
+                    ) from exc
+                if not data or len(data) > MAX_IMAGE_BYTES:
+                    raise ImageGenError("Generated image is empty or too large")
+                suffix = _image_extension(data, content_type)
+                try:
+                    actual_size = _actual_size_from_image_bytes(data, content_type)
                 except ImageGenError:
                     actual_size = ""
-                staged_path = stage_path.with_suffix(suffix)
-                stage_path.replace(staged_path)
-                staged_paths.append(staged_path)
+                stage_path = stage_path_base.with_suffix(suffix)
+                temp_path = stage_path.with_suffix(stage_path.suffix + ".part")
+                try:
+                    temp_path.write_bytes(data)
+                    temp_path.replace(stage_path)
+                except OSError as exc:
+                    temp_path.unlink(missing_ok=True)
+                    raise ImageGenError(
+                        f"Unable to save generated image: {exc}"
+                    ) from exc
+                staged_paths.append(stage_path)
                 final_paths.append(final_path_base.with_suffix(suffix))
                 staged_actual_sizes.append(actual_size)
-            except Exception:
-                stage_path.unlink(missing_ok=True)
-                raise
-            continue
+                continue
 
-    paths: list[str] = []
-    try:
+            stage_path = stage_path_base.with_suffix(".part")
+            header, content_type = _download_image_to_path(
+                str(item["url"]), endpoint, key, timeout, stage_path
+            )
+            suffix = _image_extension(header, content_type)
+            try:
+                actual_size = _actual_size_from_image_bytes(header, content_type)
+            except ImageGenError:
+                actual_size = ""
+            staged_path = stage_path.with_suffix(suffix)
+            stage_path.replace(staged_path)
+            staged_paths.append(staged_path)
+            final_paths.append(final_path_base.with_suffix(suffix))
+            staged_actual_sizes.append(actual_size)
+
+        paths: list[str] = []
         for staged_path, final_path in zip(staged_paths, final_paths):
             staged_path.replace(final_path)
             paths.append(str(final_path.resolve()))
-    except OSError as exc:
+    except Exception as exc:
         # Remove only files from this task. Previously completed customer
         # images and other tasks remain untouched.
+        if staging_dir is not None:
+            try:
+                for path in staging_dir.iterdir():
+                    if path.is_file():
+                        path.unlink(missing_ok=True)
+            except OSError:
+                pass
         for path in staged_paths:
             path.unlink(missing_ok=True)
         for path in final_paths:
             path.unlink(missing_ok=True)
+        if isinstance(exc, ImageGenError):
+            raise
         raise ImageGenError(f"Unable to publish generated image: {exc}") from exc
     finally:
         if staging_dir is not None:
@@ -1630,16 +1680,10 @@ def result_record_path(output_dir: Path, task_id: str) -> Path:
 
 
 def _idempotency_scope(task_id: str) -> str:
-    thread_id = os.environ.get("CODEX_THREAD_ID", "").strip()
-    if thread_id:
-        return f"thread:{thread_id}"
-    # CODEX_SESSION_ID identifies the desktop/runtime session and may contain
-    # multiple independent conversations.  It is therefore unsafe for result
-    # reuse: a new conversation must never receive an older conversation's
-    # preview files merely because the prompt is identical.  When Codex does
-    # not provide a thread id, bind the ledger to this exact task instead.
-    # Reconnects that reuse the same task id remain recoverable; a fresh task
-    # id is always a fresh generation.
+    # Recovery is deliberately tied to the exact task, never merely to a
+    # conversation and prompt. A new task must produce a new image even when
+    # its prompt matches an earlier request. Reconnects reuse the original
+    # task id and therefore keep duplicate-charge protection.
     return f"task:{task_id}"
 
 
@@ -1690,8 +1734,44 @@ def request_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def idempotency_record_path(output_dir: Path, fingerprint: str) -> Path:
-    return output_dir.expanduser().resolve() / ".idempotency" / f"{fingerprint}.json"
+def _task_storage_key(task_id: str) -> str:
+    return hashlib.sha256(task_id.encode("utf-8")).hexdigest()
+
+
+def idempotency_record_path(state_dir: Path, task_id: str) -> Path:
+    return (
+        state_dir.expanduser().resolve()
+        / ".idempotency"
+        / f"task-{_task_storage_key(task_id)}.json"
+    )
+
+
+def _find_legacy_idempotency_record(
+    state_dir: Path, task_id: str, current_path: Path
+) -> Path | None:
+    """Find only an older ledger record belonging to this exact task id."""
+    ledger_dir = state_dir.expanduser().resolve() / ".idempotency"
+    matches: list[Path] = []
+    try:
+        candidates = sorted(ledger_dir.glob("*.json"), key=lambda path: path.name)
+        for candidate in candidates:
+            if candidate == current_path:
+                continue
+            record = _load_idempotency_record(candidate)
+            if record and record.get("task_id") == task_id:
+                matches.append(candidate)
+    except OSError:
+        return None
+    if len(matches) > 1:
+        # Older ledgers were keyed by fingerprints, so a task id can be
+        # duplicated when an interrupted caller retried with changed args.
+        # Picking one arbitrarily could return the wrong image or status; stop
+        # without submitting anything until the records are resolved.
+        raise ImageGenError(
+            "Multiple legacy recovery records exist for this task-id; "
+            "the request was not submitted"
+        )
+    return matches[0] if matches else None
 
 
 def _load_idempotency_record(path: Path) -> dict[str, Any] | None:
@@ -1704,53 +1784,239 @@ def _load_idempotency_record(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _cached_result_files_exist(payload: dict[str, Any]) -> bool:
+def _cached_result_files_exist(
+    payload: dict[str, Any], expected_count: int | None = None
+) -> bool:
     paths = payload.get("preview_files") or payload.get("download_files")
     return bool(
         isinstance(paths, list)
         and paths
-        and all(isinstance(path, str) and Path(path).is_file() for path in paths)
+        and (expected_count is None or len(paths) == expected_count)
+        and all(
+            isinstance(path, str)
+            and Path(path).is_file()
+            and bool(_actual_size_from_image_file(path))
+            for path in paths
+        )
     )
 
 
-def _task_result_files(output_dir: Path, task_id: str) -> list[str]:
-    """Return valid final images belonging to this exact task.
+def _validated_local_image_paths(
+    values: Any, expected_count: int | None = None
+) -> list[str]:
+    if not isinstance(values, list) or not values:
+        return []
+    if expected_count is not None and len(values) != expected_count:
+        return []
+    paths: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not _actual_size_from_image_file(value):
+            return []
+        paths.append(Path(value).expanduser().resolve().as_posix())
+    return paths
 
-    New tasks use unique task-id filename prefixes in the shared image folder.
-    The legacy task-directory layout remains readable for in-flight 1.8.42
-    tasks and previously delivered results.
-    """
-    task_dir = output_dir.expanduser().resolve() / task_id
-    files: list[str] = []
-    if task_dir.is_dir():
-        candidates = sorted(task_dir.iterdir())
-    else:
-        prefix = f"image-{task_id}-"
-        candidates = sorted(
-            path
-            for path in output_dir.expanduser().resolve().iterdir()
-            if path.is_file() and path.name.startswith(prefix)
+
+def _task_image_prefix(task_id: str, fingerprint: str) -> str:
+    return f"image-{_task_storage_key(task_id)[:20]}-{fingerprint[:16]}-"
+
+
+def _task_image_name_matches(path: Path, task_id: str, fingerprint: str) -> bool:
+    prefix = re.escape(_task_image_prefix(task_id, fingerprint))
+    return bool(
+        re.fullmatch(
+            prefix
+            + r"\d{8}-\d{6}-[0-9a-f]{8}-\d+\.(?:png|jpe?g|webp|gif)$",
+            path.name,
+            re.IGNORECASE,
         )
-    for path in candidates:
+    )
+
+
+def _task_result_files(
+    output_dir: Path,
+    task_id: str,
+    fingerprint: str | None = None,
+    expected_count: int | None = None,
+    *,
+    allow_legacy: bool = False,
+) -> list[str]:
+    """Return a complete, validated image set for one exact task/request."""
+    root = output_dir.expanduser().resolve()
+    task_dir = root / task_id
+    candidates: list[Path] = []
+    try:
+        if fingerprint:
+            candidates.extend(
+                path
+                for path in root.iterdir()
+                if path.is_file()
+                and _task_image_name_matches(path, task_id, fingerprint)
+            )
+        if allow_legacy and task_dir.is_dir():
+            candidates.extend(task_dir.iterdir())
+        if allow_legacy:
+            prefix = f"image-{task_id}-"
+            legacy_name = re.compile(
+                r"\d{8}-\d{6}-[0-9a-f]{8}-\d+\.(?:png|jpe?g|webp|gif)$",
+                re.IGNORECASE,
+            )
+            candidates.extend(
+                path
+                for path in root.iterdir()
+                if path.is_file()
+                and path.name.startswith(prefix)
+                and legacy_name.fullmatch(path.name[len(prefix) :]) is not None
+            )
+    except (FileNotFoundError, OSError):
+        return []
+
+    files: list[str] = []
+    for path in sorted(set(candidates)):
         if not path.is_file() or path.name.endswith(".part"):
             continue
         if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
             continue
         try:
-            if path.stat().st_size > 0:
+            if path.stat().st_size > 0 and _actual_size_from_image_file(str(path)):
                 files.append(str(path.resolve().as_posix()))
+        except OSError:
+            continue
+    if expected_count is not None and len(files) != expected_count:
+        return []
+    return files
+
+
+def _remove_task_result_files(
+    output_dir: Path, task_id: str, fingerprint: str
+) -> None:
+    root = output_dir.expanduser().resolve()
+    prefix = _task_image_prefix(task_id, fingerprint)
+    try:
+        candidates = [
+            path
+            for path in root.iterdir()
+            if path.is_file() and path.name.startswith(prefix)
+        ]
+    except (FileNotFoundError, OSError):
+        return
+    for path in candidates:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _task_result_files_for_any_fingerprint(
+    output_dir: Path, task_id: str
+) -> list[str]:
+    """Return valid v4 images for a task, regardless of request fingerprint."""
+    root = output_dir.expanduser().resolve()
+    prefix = re.escape(f"image-{_task_storage_key(task_id)[:20]}-")
+    name_pattern = re.compile(
+        prefix
+        + r"[0-9a-f]{16}-\d{8}-\d{6}-[0-9a-f]{8}-\d+\.(?:png|jpe?g|webp|gif)$",
+        re.IGNORECASE,
+    )
+    try:
+        candidates = sorted(
+            path
+            for path in root.iterdir()
+            if path.is_file() and name_pattern.fullmatch(path.name)
+        )
+    except (FileNotFoundError, OSError):
+        return []
+    files: list[str] = []
+    for path in candidates:
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            continue
+        try:
+            if path.stat().st_size > 0 and _actual_size_from_image_file(str(path)):
+                files.append(path.resolve().as_posix())
         except OSError:
             continue
     return files
 
 
+def _record_expected_count(record: dict[str, Any], fallback: int) -> int:
+    context = record.get("request_context")
+    value = context.get("n") if isinstance(context, dict) else None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = fallback
+    return count if 1 <= count <= 4 else fallback
+
+
+def _record_original_files(
+    record: dict[str, Any], expected_count: int
+) -> list[str]:
+    context = record.get("request_context")
+    if not isinstance(context, dict):
+        return []
+    return _validated_local_image_paths(
+        context.get("original_files"), expected_count
+    )
+
+
+def _record_output_dir(record: dict[str, Any], fallback: Path) -> Path:
+    value = str(record.get("output_dir") or "").strip()
+    return Path(value).expanduser().resolve() if value else fallback.expanduser().resolve()
+
+
 def _pid_is_running(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            process_query_limited_information = 0x1000
+            still_active = 259
+            kernel32 = ctypes.windll.kernel32
+            kernel32.OpenProcess.argtypes = [
+                ctypes.c_uint32,
+                ctypes.c_int,
+                ctypes.c_uint32,
+            ]
+            kernel32.OpenProcess.restype = ctypes.c_void_p
+            kernel32.GetExitCodeProcess.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint32),
+            ]
+            kernel32.GetExitCodeProcess.restype = ctypes.c_int
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
+            handle = kernel32.OpenProcess(
+                process_query_limited_information, False, pid
+            )
+            if not handle:
+                error_code = int(kernel32.GetLastError())
+                # ERROR_INVALID_PARAMETER / ERROR_NOT_FOUND indicate that the
+                # PID is gone. Permission and unknown probe failures must not
+                # steal a lock that may still have a live owner.
+                return error_code not in {87, 1168}
+            try:
+                exit_code = ctypes.c_uint32()
+                queried = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                if not queried:
+                    # A failed process probe is inconclusive. Treating it as
+                    # a dead owner could steal a live lock and submit twice.
+                    return True
+                return exit_code.value == still_active
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, TypeError, ValueError):
+            # Failing closed is safer than terminating or stealing a live
+            # task lock. The caller will wait and never submit a second POST.
+            return True
     try:
         os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
         return False
+    except (PermissionError, OSError):
+        # EPERM and inconclusive platform errors do not prove that the owner
+        # exited. Failing closed prevents a second paid submit.
+        return True
     return True
 
 
@@ -1762,81 +2028,122 @@ def _lock_pid(path: Path) -> int | None:
         return None
 
 
+def _try_reap_stale_task_lock(lock_path: Path) -> bool:
+    """Remove a stale task lock while serializing all competing reapers."""
+    reaper_path = lock_path.parent / ".lock-reaper"
+    descriptor: int | None = None
+    locked = False
+    windows_lock = False
+    try:
+        descriptor = os.open(reaper_path, os.O_CREAT | os.O_RDWR, 0o600)
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return False
+            windows_lock = True
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+        locked = True
+
+        # Re-read the owner only after obtaining the reaper lock. Another
+        # process may already have replaced the stale lock with a live one.
+        owner_pid = _lock_pid(lock_path)
+        if owner_pid is not None:
+            if _pid_is_running(owner_pid):
+                return False
+        else:
+            try:
+                lock_age_ms = (
+                    time.time_ns() - lock_path.stat().st_mtime_ns
+                ) // 1_000_000
+            except (FileNotFoundError, OSError):
+                return False
+            if lock_age_ms <= IDEMPOTENCY_TTL_MS:
+                return False
+        try:
+            lock_path.unlink()
+        except (FileNotFoundError, OSError):
+            return False
+        return True
+    except (ImportError, OSError):
+        # Failing closed may delay recovery, but it cannot permit a second
+        # paid request when the lock owner is unknown.
+        return False
+    finally:
+        if descriptor is not None:
+            if locked:
+                try:
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    if windows_lock:
+                        import msvcrt
+
+                        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except (ImportError, OSError):
+                    pass
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def claim_idempotency(
-    output_dir: Path, fingerprint: str, task_id: str, timeout: int
+    output_dir: Path,
+    fingerprint: str,
+    task_id: str,
+    timeout: int,
+    *,
+    state_dir: Path | None = None,
+    expected_count: int = 1,
+    recovery_only: bool = False,
 ) -> tuple[Path, Path, dict[str, Any] | None]:
-    record_path = idempotency_record_path(output_dir, fingerprint)
+    """Claim the one global lock for an exact task id.
+
+    The fingerprint validates that a reconnect is asking for the same request;
+    it never selects a separate lock. This prevents a reused task id with
+    changed arguments or output directory from issuing a second paid POST.
+    """
+    ledger_root = (state_dir or output_dir).expanduser().resolve()
+    output_dir = output_dir.expanduser().resolve()
+    record_path = idempotency_record_path(ledger_root, task_id)
     lock_path = record_path.with_suffix(".lock")
     record_path.parent.mkdir(parents=True, exist_ok=True)
-    # Keep the deduplication ledger available to the script while hiding it
-    # from ordinary Explorer/Codex views.  The files themselves are retained
-    # because removing them would re-enable duplicate paid submissions.
+    # Only an active or genuinely unknown task needs durable state. Terminal
+    # success/failure records are removed after their stdout handoff.
     _hide_directory(record_path.parent)
     deadline = time.monotonic() + timeout
     while True:
         now_ms = time.time_ns() // 1_000_000
-        record = _load_idempotency_record(record_path)
-        if record:
-            if int(record.get("version") or 0) not in RECOVERABLE_IDEMPOTENCY_VERSIONS:
-                # A ledger from an older Skill has different error-lifecycle
-                # semantics; never reuse it for the current request.
-                try:
-                    record_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                record = None
-            if record is None:
-                continue
-            age_ms = now_ms - int(record.get("created_at_ms") or 0)
-            if 0 <= age_ms <= IDEMPOTENCY_TTL_MS:
-                status = record.get("status")
-                if status == "success":
-                    payload = record.get("payload")
-                    if isinstance(payload, dict) and _cached_result_files_exist(payload):
-                        return record_path, lock_path, payload
-                if status == "uncertain":
-                    detail = str(record.get("error") or "previous identical request did not complete safely")
-                    raise ImageGenError(
-                        "An identical request in this Codex conversation has already been submitted "
-                        "or has an unknown final state, so it was not submitted again. Use --force-new "
-                        f"only after the user explicitly confirms a retry. Previous error: {detail[:800]}"
-                    )
-                if status == "in_progress":
-                    # A live owner is still doing the original paid request.
-                    # A dead owner means Codex was interrupted; keep the
-                    # original record and recover it instead of submitting a
-                    # second request.
-                    pass
-                if status == "failed":
-                    try:
-                        record_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-            else:
-                try:
-                    record_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
         try:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             owner_pid = _lock_pid(lock_path)
-            if owner_pid is not None and not _pid_is_running(owner_pid):
+            stale_candidate = bool(
+                owner_pid is not None and not _pid_is_running(owner_pid)
+            )
+            if owner_pid is None:
                 try:
-                    lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                continue
-            try:
-                lock_age_ms = now_ms - int(lock_path.stat().st_mtime_ns // 1_000_000)
-            except (FileNotFoundError, OSError):
-                continue
-            if lock_age_ms > IDEMPOTENCY_TTL_MS:
-                try:
-                    lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                    lock_age_ms = (
+                        time.time_ns() - lock_path.stat().st_mtime_ns
+                    ) // 1_000_000
+                except (FileNotFoundError, OSError):
+                    continue
+                stale_candidate = lock_age_ms > IDEMPOTENCY_TTL_MS
+            if stale_candidate and _try_reap_stale_task_lock(lock_path):
                 continue
             if time.monotonic() >= deadline:
                 raise ImageGenError(
@@ -1844,29 +2151,212 @@ def claim_idempotency(
                 )
             time.sleep(IDEMPOTENCY_WAIT_INTERVAL_SECONDS)
             continue
+        try:
+            try:
+                os.write(descriptor, str(os.getpid()).encode("ascii"))
+            finally:
+                os.close(descriptor)
 
-        os.write(descriptor, str(os.getpid()).encode("ascii"))
-        os.close(descriptor)
-        if record and record.get("status") == "in_progress":
-            # The lock is ours now.  Return a recovery sentinel to the caller;
-            # it must resolve the saved task or local result before releasing
-            # this lock.  Never overwrite the old task with a new submission.
-            recovery = dict(record)
-            recovery["_recovery_record"] = True
-            return record_path, lock_path, recovery
-        _atomic_write_json(
-            record_path,
-            {
-                "version": IDEMPOTENCY_VERSION,
-                "fingerprint": fingerprint,
-                "status": "in_progress",
-                "task_id": task_id,
-                "created_at_ms": now_ms,
-                "request_started_at_ms": now_ms,
-                "owner_pid": os.getpid(),
-            },
-        )
-        return record_path, lock_path, None
+            record_source = record_path
+            record = _load_idempotency_record(record_path)
+            if record is None and record_path.exists():
+                # The v4 filename is derived only from the exact task id. An
+                # unreadable or malformed file may therefore be the last
+                # durable evidence of an already submitted paid request.
+                # Never overwrite it and silently turn recovery into a POST.
+                raise ImageGenError(
+                    "The task-id recovery record is unreadable or invalid; "
+                    "the request was not submitted"
+                )
+            if record is None:
+                roots = (ledger_root, output_dir)
+                seen_roots: set[Path] = set()
+                legacy_matches: list[Path] = []
+                for root in roots:
+                    if root in seen_roots:
+                        continue
+                    seen_roots.add(root)
+                    legacy = _find_legacy_idempotency_record(root, task_id, record_path)
+                    if legacy is not None:
+                        legacy_matches.append(legacy)
+                if len(legacy_matches) > 1:
+                    raise ImageGenError(
+                        "Multiple legacy recovery records exist for this task-id; "
+                        "the request was not submitted"
+                    )
+                if legacy_matches:
+                    record_source = legacy_matches[0]
+                    record = _load_idempotency_record(record_source)
+
+            allow_legacy = False
+            if record is not None:
+                version = int(record.get("version") or 0)
+                if record.get("task_id") != task_id:
+                    raise ImageGenError(
+                        "The task-id recovery record is inconsistent; the request was not submitted"
+                    )
+                if version not in RECOVERABLE_IDEMPOTENCY_VERSIONS:
+                    # Reusing an exact task id is recovery, never permission
+                    # to discard an older/unknown ledger and pay for another
+                    # submit. A genuinely new customer request uses a fresh
+                    # task id and is unaffected by this record.
+                    raise ImageGenError(
+                        "The task-id recovery record uses an incompatible version; "
+                        "the request was not submitted"
+                    )
+                elif version == IDEMPOTENCY_VERSION:
+                    if record.get("fingerprint") != fingerprint:
+                        raise ImageGenError(
+                            "This --task-id is already bound to different image arguments; "
+                            "use a new --task-id. The request was not submitted"
+                        )
+                else:
+                    # Older fingerprints changed format between releases. The
+                    # exact task id is the safe migration key; recovery never
+                    # starts a new POST from this legacy record.
+                    legacy_lock = record_source.with_suffix(".lock")
+                    if record_source != record_path and legacy_lock.exists():
+                        legacy_owner = _lock_pid(legacy_lock)
+                        if legacy_owner is None or _pid_is_running(legacy_owner):
+                            raise ImageGenError(
+                                "An older Skill process still owns this exact image task; "
+                                "it was not submitted again"
+                            )
+                        legacy_lock.unlink(missing_ok=True)
+                    allow_legacy = True
+                    migrated = dict(record)
+                    if not str(migrated.get("output_dir") or "").strip():
+                        # v2/v3 records lived in <output>/.idempotency. Keep
+                        # recovery pointed at that original output directory
+                        # even when the reconnect supplies a new --out-dir.
+                        inferred_root = record_source.parent.parent
+                        migrated["output_dir"] = inferred_root.as_posix()
+                    migrated.update(
+                        {
+                            "version": IDEMPOTENCY_VERSION,
+                            "fingerprint": fingerprint,
+                            "migrated_from_version": version,
+                            "legacy_file_layout": True,
+                            "updated_at_ms": now_ms,
+                        }
+                    )
+                    _atomic_write_json(record_path, migrated)
+                    if record_source != record_path:
+                        record_source.unlink(missing_ok=True)
+                    record_source = record_path
+                    record = migrated
+
+            if record is not None:
+                status = record.get("status")
+                record_output = _record_output_dir(record, output_dir)
+                record_count = _record_expected_count(record, expected_count)
+                record_fingerprint = str(record.get("fingerprint") or fingerprint)
+                allow_legacy = allow_legacy or bool(record.get("legacy_file_layout"))
+                local_files = _record_original_files(record, record_count)
+                if not local_files:
+                    local_files = _task_result_files(
+                        record_output,
+                        task_id,
+                        record_fingerprint,
+                        record_count,
+                        allow_legacy=allow_legacy,
+                    )
+                if status == "success":
+                    payload = record.get("payload")
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("task_id") == task_id
+                        and _cached_result_files_exist(payload, record_count)
+                    ):
+                        lock_path.unlink(missing_ok=True)
+                        return record_path, lock_path, payload
+                    if local_files:
+                        recovery = dict(record)
+                        recovery["_recovery_record"] = True
+                        return record_path, lock_path, recovery
+                    raise ImageGenError(
+                        "This exact task completed previously, but its image files are unavailable; "
+                        "it was not submitted again"
+                    )
+                if status == "failed":
+                    record_path.unlink(missing_ok=True)
+                    record = None
+                elif status in {"in_progress", "uncertain"}:
+                    recovery = dict(record)
+                    recovery["_recovery_record"] = True
+                    return record_path, lock_path, recovery
+                elif status not in {None, "failed"}:
+                    raise ImageGenError(
+                        "The task-id recovery record has an unknown state; the request was not submitted"
+                    )
+
+            local_files = _task_result_files(
+                output_dir, task_id, fingerprint, expected_count
+            )
+            if local_files:
+                lock_path.unlink(missing_ok=True)
+                return record_path, lock_path, {
+                    "_local_task_files": local_files,
+                    "task_id": task_id,
+                }
+            legacy_files = _task_result_files(
+                output_dir,
+                task_id,
+                expected_count=expected_count,
+                allow_legacy=True,
+            )
+            if legacy_files:
+                lock_path.unlink(missing_ok=True)
+                return record_path, lock_path, {
+                    "_local_task_files": legacy_files,
+                    "task_id": task_id,
+                }
+            partial_legacy_files = _task_result_files(
+                output_dir, task_id, allow_legacy=True
+            )
+            if partial_legacy_files:
+                raise ImageGenError(
+                    "This --task-id already has an incomplete legacy result; "
+                    "it was not submitted again"
+                )
+            any_task_files = _task_result_files_for_any_fingerprint(
+                output_dir, task_id
+            )
+            if any_task_files:
+                if recovery_only and len(any_task_files) == expected_count:
+                    lock_path.unlink(missing_ok=True)
+                    return record_path, lock_path, {
+                        "_local_task_files": any_task_files,
+                        "task_id": task_id,
+                    }
+                raise ImageGenError(
+                    "This --task-id already has an incomplete or differently configured result; "
+                    "it was not submitted again"
+                )
+            if recovery_only:
+                raise ImageGenError(
+                    "This story page is marked as already started, but no exact recovery "
+                    "record or complete local result exists; it was not submitted again"
+                )
+            _atomic_write_json(
+                record_path,
+                {
+                    "version": IDEMPOTENCY_VERSION,
+                    "fingerprint": fingerprint,
+                    "status": "in_progress",
+                    "task_id": task_id,
+                    "created_at_ms": now_ms,
+                    "request_started_at_ms": now_ms,
+                    "owner_pid": os.getpid(),
+                },
+            )
+            return record_path, lock_path, None
+        except Exception:
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
 
 def finish_idempotency(
@@ -1880,24 +2370,45 @@ def finish_idempotency(
 ) -> None:
     if record_path is None or fingerprint is None or task_id is None:
         return
-    record: dict[str, Any] = {
-        "version": IDEMPOTENCY_VERSION,
-        "fingerprint": fingerprint,
-        "status": "success" if payload is not None else "uncertain" if uncertain else "failed",
-        "task_id": task_id,
-        "created_at_ms": time.time_ns() // 1_000_000,
-    }
-    if payload is not None:
-        record["payload"] = payload
-    else:
-        record["error"] = (error or "request failed")[:1000]
+    release_lock = True
     try:
+        if payload is None and not uncertain:
+            record_path.unlink(missing_ok=True)
+            return
+        if uncertain:
+            # Preserve the request context and upstream status handle written
+            # before polling. Replacing this record would make safe recovery
+            # impossible and leave only a duplicate-submission block.
+            record = _load_idempotency_record(record_path) or {}
+            record.update(
+                {
+                    "version": IDEMPOTENCY_VERSION,
+                    "fingerprint": fingerprint,
+                    "status": "uncertain",
+                    "task_id": task_id,
+                    "error": (error or "request outcome is unknown")[:1000],
+                    "updated_at_ms": time.time_ns() // 1_000_000,
+                }
+            )
+        else:
+            record = {
+                "version": IDEMPOTENCY_VERSION,
+                "fingerprint": fingerprint,
+                "status": "success",
+                "task_id": task_id,
+                "created_at_ms": time.time_ns() // 1_000_000,
+                "payload": payload,
+            }
         _atomic_write_json(record_path, record)
-        _schedule_result_hide(record_path)
-    except ImageGenError:
-        pass
+        if uncertain:
+            _schedule_result_hide(record_path)
+    except (ImageGenError, OSError):
+        # If an unknown paid outcome cannot be persisted, retain the live
+        # process lock. The prior in-progress record remains the recovery
+        # fallback after this process exits.
+        release_lock = not uncertain
     finally:
-        if lock_path is not None:
+        if lock_path is not None and release_lock:
             try:
                 lock_path.unlink(missing_ok=True)
             except OSError:
@@ -1924,12 +2435,41 @@ def update_idempotency_request(
             "updated_at_ms": time.time_ns() // 1_000_000,
         }
     )
-    try:
-        _atomic_write_json(record_path, record)
-    except ImageGenError:
-        # The lock still prevents a concurrent duplicate.  If persistence
-        # fails, the normal request can proceed but recovery will fail closed.
-        pass
+    # This state is written before the paid request. If it cannot be persisted,
+    # stop locally instead of creating a task that cannot be recovered safely.
+    _atomic_write_json(record_path, record)
+
+
+def update_idempotency_local_stage(
+    record_path: Path | None,
+    task_id: str | None,
+    original_files: list[str],
+    *,
+    processed_files: list[str] | None = None,
+    postprocess_manifest: str | None = None,
+) -> None:
+    """Persist local delivery progress so reconnect never repeats the POST."""
+    if record_path is None or task_id is None:
+        return
+    record = _load_idempotency_record(record_path)
+    if not record or record.get("task_id") != task_id:
+        raise ImageGenError(
+            "Unable to persist local image recovery state; the original files were kept"
+        )
+    context = record.get("request_context")
+    if not isinstance(context, dict):
+        raise ImageGenError(
+            "Image recovery metadata is incomplete; the original files were kept"
+        )
+    context = dict(context)
+    context["original_files"] = preview_paths(original_files)
+    if processed_files is not None:
+        context["processed_files"] = preview_paths(processed_files)
+        context["postprocess_manifest"] = postprocess_manifest
+        context["postprocess_complete"] = True
+    record["request_context"] = context
+    record["updated_at_ms"] = time.time_ns() // 1_000_000
+    _atomic_write_json(record_path, record)
 
 
 def mark_idempotency_submission(
@@ -1965,6 +2505,67 @@ def mark_idempotency_submission(
         pass
 
 
+def _recover_postprocessed_files(
+    context: dict[str, Any], files: list[str]
+) -> tuple[list[str], str | None, str]:
+    expected_count = len(files)
+    completed = _validated_local_image_paths(
+        context.get("processed_files"), expected_count
+    )
+    if context.get("postprocess_complete") and completed:
+        return (
+            completed,
+            str(context.get("postprocess_manifest") or "") or None,
+            _actual_size_from_image_file(completed[0]),
+        )
+
+    config = context.get("postprocess_config")
+    if not isinstance(config, dict) or not str(config.get("output_dir") or "").strip():
+        raise ImageGenError(
+            "Local post-processing recovery metadata is incomplete; "
+            "the original generated image was kept and no request was submitted again"
+        )
+    try:
+        processed = process_many(
+            files,
+            Path(str(config["output_dir"])).expanduser().resolve(),
+            output_size=config.get("output_size"),
+            fit=str(config.get("fit") or "cover"),
+            position=str(config.get("position") or "center"),
+            crop=config.get("crop"),
+            output_format=str(config.get("output_format") or "same"),
+            quality=int(config.get("output_quality") or 90),
+            background_color=config.get("output_background"),
+        )
+    except (PostprocessError, OSError, TypeError, ValueError) as exc:
+        raise ImageGenError(
+            "Local post-processing recovery failed; the original generated image "
+            f"was kept and no request was submitted again: {exc}"
+        ) from exc
+    processed_files = [
+        Path(str(item["output"])).expanduser().resolve().as_posix()
+        for item in processed
+    ]
+    processed_files = _validated_local_image_paths(
+        processed_files, expected_count
+    )
+    if not processed_files:
+        raise ImageGenError(
+            "Local post-processing recovery produced an incomplete result; "
+            "the original generated image was kept"
+        )
+    manifest = (
+        Path(str(config["output_dir"])).expanduser().resolve()
+        / "postprocess-manifest.json"
+    )
+    actual_size = (
+        f"{processed[0]['output_width']}×{processed[0]['output_height']}"
+        if processed
+        else ""
+    )
+    return processed_files, manifest.as_posix(), actual_size
+
+
 def _recovery_payload(
     record: dict[str, Any], files: list[str], output_dir: Path
 ) -> dict[str, Any]:
@@ -1977,8 +2578,16 @@ def _recovery_payload(
     quality = str(context.get("quality") or "auto")
     aspect_ratio = str(context.get("aspect_ratio") or "auto")
     actual_size = _actual_size_from_image_file(files[0]) if files else ""
-    previews = preview_paths(files)
-    return {
+    original_previews = preview_paths(files)
+    processed_files = files
+    postprocess_manifest = None
+    postprocess_requested = bool(context.get("postprocess", False))
+    if postprocess_requested:
+        processed_files, postprocess_manifest, actual_size = (
+            _recover_postprocessed_files(context, files)
+        )
+    previews = preview_paths(processed_files)
+    payload = {
         "ok": True,
         "skill_name": SKILL_NAME,
         "version": SKILL_VERSION,
@@ -2000,14 +2609,18 @@ def _recovery_payload(
         "async": bool(context.get("async", True)),
         "recovered_after_reconnect": True,
         "files": files,
-        "original_files": previews,
-        "processed_files": files,
+        "original_files": original_previews,
+        "processed_files": processed_files,
         "preview_files": previews,
         "download_files": previews,
-        "postprocess": bool(context.get("postprocess", False)),
-        "postprocess_manifest": context.get("postprocess_manifest"),
+        "postprocess": postprocess_requested,
+        "postprocess_manifest": postprocess_manifest,
         "recovered_output_dir": output_dir.resolve().as_posix(),
     }
+    story = _recover_story_result(record, files)
+    if story is not None:
+        payload["story"] = story
+    return payload
 
 
 def recover_submitted_task(
@@ -2024,7 +2637,19 @@ def recover_submitted_task(
     task_id = str(record.get("task_id") or "").strip()
     if not task_id:
         raise ImageGenError("Interrupted task has no recoverable task id")
-    files = _task_result_files(output_dir, task_id)
+    recovery_output_dir = _record_output_dir(record, output_dir)
+    expected_count = _record_expected_count(record, 1)
+    record_fingerprint = str(record.get("fingerprint") or fingerprint)
+    allow_legacy = bool(record.get("legacy_file_layout"))
+    files = _record_original_files(record, expected_count)
+    if not files:
+        files = _task_result_files(
+            recovery_output_dir,
+            task_id,
+            record_fingerprint,
+            expected_count,
+            allow_legacy=allow_legacy,
+        )
     if not files:
         upstream_task_id = str(record.get("upstream_task_id") or "").strip()
         if not upstream_task_id:
@@ -2039,15 +2664,26 @@ def recover_submitted_task(
             key,
             timeout,
         )
+        _remove_task_result_files(recovery_output_dir, task_id, record_fingerprint)
         files = save_images(
             result,
             str(record.get("result_endpoint") or generation_endpoint_url),
             key,
-            output_dir,
+            recovery_output_dir,
             timeout,
             task_id=task_id,
+            task_fingerprint=record_fingerprint,
+            expected_count=expected_count,
         )
-    payload = _recovery_payload(record, files, output_dir)
+    payload = _recovery_payload(record, files, recovery_output_dir)
+    if payload.get("postprocess"):
+        update_idempotency_local_stage(
+            record_path,
+            task_id,
+            files,
+            processed_files=list(payload.get("processed_files") or []),
+            postprocess_manifest=str(payload.get("postprocess_manifest") or "") or None,
+        )
     finish_idempotency(
         record_path,
         lock_path,
@@ -2057,9 +2693,10 @@ def recover_submitted_task(
     )
     emit_success(
         payload,
-        output_dir,
+        recovery_output_dir,
         task_id,
         int(record.get("request_started_at_ms") or time.time_ns() // 1_000_000),
+        cleanup_paths=[record_path],
     )
     return payload
 
@@ -2069,6 +2706,7 @@ def emit_reused_success(
     output_dir: Path,
     task_id: str,
     request_started_at_ms: int,
+    record_path: Path | None = None,
 ) -> dict[str, Any]:
     payload = dict(cached_payload)
     reused_from_task_id = payload.get("task_id")
@@ -2081,6 +2719,8 @@ def emit_reused_success(
         "result_file",
         "result_match",
         "result_hide_delay_ms",
+        "result_file_ephemeral",
+        "result_cleanup_delay_ms",
     ):
         payload.pop(key, None)
     payload["idempotency_reused"] = True
@@ -2103,7 +2743,13 @@ def emit_reused_success(
             str(payload.get("quality") or "auto"),
             str(payload.get("aspect_ratio") or "auto"),
         )
-    return emit_success(payload, output_dir, task_id, request_started_at_ms)
+    return emit_success(
+        payload,
+        output_dir,
+        task_id,
+        request_started_at_ms,
+        cleanup_paths=[record_path] if record_path is not None else (),
+    )
 
 
 def ensure_new_task(output_dir: Path, task_id: str) -> None:
@@ -2283,6 +2929,7 @@ def _complete_story_page(
             "page": page,
             "pending_page": None,
             "last_original_file": Path(original_file).resolve().as_posix(),
+            "last_completed_task_id": task_id,
             "current_task_id": None,
             "updated_at_ms": time.time_ns() // 1_000_000,
         }
@@ -2343,6 +2990,51 @@ def story_result_payload(path: Path, state: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _recover_story_result(
+    record: dict[str, Any], files: list[str]
+) -> dict[str, Any] | None:
+    """Advance or reuse the exact story page associated with recovered files."""
+    context = record.get("request_context")
+    context = context if isinstance(context, dict) else {}
+    path_value = str(context.get("story_state_file") or "").strip()
+    if not path_value:
+        return None
+    if not files:
+        raise ImageGenError("Recovered story page has no image file")
+    task_id = str(record.get("task_id") or "").strip()
+    expected_page = context.get("story_page")
+    story_path = Path(path_value).expanduser().resolve()
+    state = _load_story_state(story_path)
+    if state.get("status") == "in_progress":
+        if state.get("current_task_id") != task_id:
+            raise ImageGenError(
+                "Story recovery state belongs to a different task; nothing was submitted"
+            )
+        state = _complete_story_page(story_path, task_id, files[0])
+    else:
+        completed_task_id = str(state.get("last_completed_task_id") or "").strip()
+        same_legacy_page = False
+        last_original_file = str(state.get("last_original_file") or "").strip()
+        if not completed_task_id and expected_page is not None and last_original_file:
+            try:
+                same_legacy_page = (
+                    int(state.get("page") or 0) == int(expected_page)
+                    and Path(last_original_file).resolve()
+                    == Path(files[0]).resolve()
+                )
+            except (TypeError, ValueError, OSError):
+                same_legacy_page = False
+        if completed_task_id != task_id and not same_legacy_page:
+            raise ImageGenError(
+                "Story recovery no longer matches this completed page; nothing was submitted"
+            )
+        if state.get("status") not in {"active", "completed"}:
+            raise ImageGenError(
+                "Story recovery state is not usable; nothing was submitted"
+            )
+    return story_result_payload(story_path, state)
+
+
 def _utc_millis_text(timestamp_ms: int) -> str:
     seconds, millis = divmod(timestamp_ms, 1000)
     return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(seconds))}.{millis:03d}Z"
@@ -2391,13 +3083,65 @@ def _schedule_result_hide(path: Path) -> bool:
     return True
 
 
+def _remove_transient_files(paths: Iterable[Path]) -> None:
+    parents: set[Path] = set()
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+            parents.add(path.parent)
+        except OSError:
+            continue
+    for parent in parents:
+        if parent.name not in {".idempotency", ".stories", ".handoff"}:
+            continue
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
+def _schedule_result_cleanup(paths: Iterable[Path]) -> bool:
+    """Remove terminal handoff state without delaying image presentation."""
+    unique = list(dict.fromkeys(path.resolve() for path in paths if path is not None))
+    if not unique:
+        return True
+    if os.name != "nt":
+        _remove_transient_files(unique)
+        return True
+    helper = Path(__file__).resolve().with_name("hide_result.py")
+    if not helper.is_file():
+        _remove_transient_files(unique)
+        return False
+    try:
+        subprocess.Popen(
+            [
+                sys.executable,
+                str(helper),
+                *(str(path) for path in unique),
+                "--delay-ms",
+                str(RESULT_CLEANUP_DELAY_MS),
+                "--delete",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=0x08000000 | 0x00000008,
+        )
+    except OSError:
+        _remove_transient_files(unique)
+        return False
+    return True
+
+
 def emit_success(
     payload: dict[str, Any],
     output_dir: Path,
     task_id: str,
     request_started_at_ms: int,
+    cleanup_paths: Iterable[Path] = (),
 ) -> dict[str, Any]:
-    """Atomically persist and emit the exact current-task result once."""
+    """Atomically emit one result, then remove its transient JSON state."""
     completed_at_ms = max(time.time_ns() // 1_000_000, request_started_at_ms)
     result_path = result_record_path(output_dir, task_id)
     result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2415,7 +3159,10 @@ def emit_success(
                 "not_before_ms": request_started_at_ms,
                 "completed_at_ms": completed_at_ms,
             },
-            "result_hide_delay_ms": RESULT_HIDE_DELAY_MS if os.name == "nt" else None,
+            "result_file_ephemeral": True,
+            "result_cleanup_delay_ms": (
+                RESULT_CLEANUP_DELAY_MS if os.name == "nt" else 0
+            ),
         }
     )
     temp_path = result_path.with_suffix(result_path.suffix + f".{uuid.uuid4().hex}.tmp")
@@ -2432,7 +3179,7 @@ def emit_success(
         raise ImageGenError(f"Unable to save the current task result JSON: {exc}") from exc
 
     print(json.dumps(enriched, ensure_ascii=False), flush=True)
-    _schedule_result_hide(result_path)
+    _schedule_result_cleanup([result_path, *cleanup_paths])
     return enriched
 
 
@@ -2622,6 +3369,9 @@ def main() -> int:
     story_begun = False
     story_root_prompt: str | None = None
     story_page: int | None = None
+    story_resume_in_progress = False
+    story_resume_completed = False
+    story_state_owned = False
     provider = "auto"
     idempotency_fingerprint: str | None = None
     idempotency_record: Path | None = None
@@ -2656,12 +3406,40 @@ def main() -> int:
                 raise ImageGenError("--story-next cannot be combined with --process-only")
             story_path = args.story_next.expanduser().resolve()
             story_state = _load_story_state(story_path)
-            if story_state.get("status") != "active":
+            requested_story_task_id = normalize_task_id(args.task_id)
+            if (
+                story_state.get("status") == "active"
+                and story_state.get("next_task_id") == requested_story_task_id
+            ):
+                story_page = int(story_state.get("page", 0)) + 1
+            elif (
+                story_state.get("status") in {"active", "completed"}
+                and story_state.get("last_completed_task_id")
+                == requested_story_task_id
+            ):
+                story_page = int(story_state.get("page") or 0)
+                story_resume_completed = True
+            elif (
+                story_state.get("status") in {"active", "completed"}
+                and not story_state.get("last_completed_task_id")
+                and story_state.get("last_original_file")
+            ):
+                # v1 story state did not retain last_completed_task_id. Enter
+                # recovery-only mode; the exact task ledger/image must still
+                # prove ownership before any result can be emitted.
+                story_page = int(story_state.get("page") or 0)
+                story_resume_completed = True
+            elif (
+                story_state.get("status") == "in_progress"
+                and story_state.get("current_task_id") == requested_story_task_id
+            ):
+                story_page = int(story_state.get("pending_page") or 0)
+                story_resume_in_progress = True
+            else:
                 raise ImageGenError(
                     f"Story cannot continue because its status is {story_state.get('status', 'unknown')}"
                 )
             story_root_prompt = str(story_state.get("root_prompt") or "").strip()
-            story_page = int(story_state.get("page", 0)) + 1
             total_pages = int(story_state.get("total_pages", 0))
             args.prompt = build_story_page_prompt(
                 story_root_prompt, story_page, total_pages
@@ -2781,9 +3559,9 @@ def main() -> int:
             output_dir = args.out_dir or (
                 Path.home() / ".codex" / "generated_images" / SKILL_NAME
             )
-        ensure_new_task(output_dir, task_id)
-
+        state_dir = Path.home() / ".codex" / "generated_images" / SKILL_NAME
         if args.story_pages is not None:
+            story_path = story_state_path(output_dir, _story_id(task_id))
             if not story_root_prompt:
                 raise ImageGenError("Prompt must not be empty")
             raw_prompt = build_story_page_prompt(
@@ -2959,6 +3737,43 @@ def main() -> int:
             },
             force_new=args.force_new,
         )
+        postprocess_requested = local_postprocess_requested(args)
+        processed_dir = (
+            args.postprocess_dir or (output_dir / "processed")
+            if postprocess_requested
+            else None
+        )
+        postprocess_config = (
+            {
+                "output_dir": processed_dir.expanduser().resolve().as_posix(),
+                "output_size": args.output_size,
+                "fit": args.fit,
+                "position": args.position,
+                "crop": args.crop,
+                "output_format": args.output_format,
+                "output_quality": args.output_quality or 90,
+                "output_background": args.output_background,
+            }
+            if processed_dir is not None
+            else None
+        )
+        request_context = {
+            "mode": mode,
+            "model": model,
+            "provider": provider,
+            "size": size,
+            "requested_size": requested_size,
+            "quality": quality,
+            "aspect_ratio": aspect_ratio,
+            "aspect_ratio_source": aspect_ratio_source,
+            "n": args.n,
+            "async": async_mode,
+            "resized_for_edit": mode == "edit" and size != edit_input_size,
+            "postprocess": postprocess_requested,
+            "postprocess_config": postprocess_config,
+            "story_state_file": story_path.as_posix() if story_path else "",
+            "story_page": story_page,
+        }
         (
             idempotency_record,
             idempotency_lock,
@@ -2968,10 +3783,15 @@ def main() -> int:
             idempotency_fingerprint,
             task_id,
             args.timeout,
+            state_dir=state_dir,
+            expected_count=args.n,
+            recovery_only=story_resume_in_progress or story_resume_completed,
         )
         if cached_payload is not None:
             if cached_payload.get("_recovery_record"):
                 task_id = str(cached_payload.get("task_id") or task_id)
+                request_submitted = True
+                story_state_owned = story_path is not None
                 recover_submitted_task(
                     cached_payload,
                     idempotency_record,
@@ -2983,27 +3803,33 @@ def main() -> int:
                     args.timeout,
                 )
                 return 0
+            if cached_payload.get("_local_task_files"):
+                local_files = cached_payload.get("_local_task_files") or []
+                recovered_payload = _recovery_payload(
+                    {
+                        "task_id": task_id,
+                        "request_started_at_ms": request_started_at_ms,
+                        "request_context": request_context,
+                    },
+                    local_files,
+                    output_dir,
+                )
+                emit_success(
+                    recovered_payload,
+                    output_dir,
+                    task_id,
+                    request_started_at_ms,
+                    cleanup_paths=[idempotency_record],
+                )
+                return 0
             emit_reused_success(
                 cached_payload,
                 output_dir,
                 task_id,
                 request_started_at_ms,
+                record_path=idempotency_record,
             )
             return 0
-
-        request_context = {
-            "mode": mode,
-            "model": model,
-            "provider": provider,
-            "size": size,
-            "requested_size": requested_size,
-            "quality": quality,
-            "aspect_ratio": aspect_ratio,
-            "aspect_ratio_source": aspect_ratio_source,
-            "async": async_mode,
-            "resized_for_edit": mode == "edit" and size != edit_input_size,
-            "postprocess": local_postprocess_requested(args),
-        }
         update_idempotency_request(
             idempotency_record,
             task_id,
@@ -3014,10 +3840,13 @@ def main() -> int:
         if args.story_next is not None:
             if story_path is None:
                 raise ImageGenError("Story state path is missing")
-            story_state = _claim_story_continuation(story_path, task_id)
+            if not story_resume_in_progress:
+                story_state = _claim_story_continuation(story_path, task_id)
             story_begun = True
+            story_state_owned = True
         elif args.story_pages is not None:
-            story_path = story_state_path(output_dir, _story_id(task_id))
+            if story_path is None:
+                raise ImageGenError("Story state path is missing")
             story_state = _start_story(
                 story_path,
                 task_id,
@@ -3030,6 +3859,7 @@ def main() -> int:
                 aspect_ratio,
             )
             story_begun = True
+            story_state_owned = True
 
         validate_edit_delivery_options(
             mode,
@@ -3048,7 +3878,6 @@ def main() -> int:
                 options["stream"] = "true"
             if async_mode:
                 options["async"] = "true"
-            request_submitted = True
             result = call_edit_api(
                 edit_url,
                 key,
@@ -3062,6 +3891,7 @@ def main() -> int:
                 options,
                 idempotency_fingerprint,
             )
+            request_submitted = True
             result_endpoint = generation_url if async_mode else edit_url
             mark_idempotency_submission(
                 idempotency_record,
@@ -3077,7 +3907,6 @@ def main() -> int:
             )
         else:
             options["aspect_ratio"] = aspect_ratio
-            request_submitted = True
             result = call_api(
                 generation_url,
                 key,
@@ -3095,6 +3924,7 @@ def main() -> int:
                 metadata=metadata,
                 idempotency_key=idempotency_fingerprint,
             )
+            request_submitted = True
             mark_idempotency_submission(
                 idempotency_record,
                 task_id,
@@ -3116,14 +3946,20 @@ def main() -> int:
             output_dir,
             args.timeout,
             task_id=task_id,
+            task_fingerprint=idempotency_fingerprint,
+            expected_count=args.n,
             actual_sizes=saved_actual_sizes,
         )
+        if postprocess_requested:
+            update_idempotency_local_stage(
+                idempotency_record, task_id, files
+            )
         original_files = preview_paths(files)
         processed_files = files.copy()
-        postprocess_requested = local_postprocess_requested(args)
         postprocess_manifest = None
         if postprocess_requested:
-            processed_dir = args.postprocess_dir or (output_dir / "processed")
+            if processed_dir is None:
+                raise ImageGenError("Local post-processing output directory is missing")
             try:
                 processed = process_many(
                     files,
@@ -3138,6 +3974,14 @@ def main() -> int:
                 )
             except PostprocessError as exc:
                 _fail_story_page(story_path, task_id, str(exc))
+                finish_idempotency(
+                    idempotency_record,
+                    idempotency_lock,
+                    idempotency_fingerprint,
+                    task_id,
+                    error=str(exc),
+                    uncertain=False,
+                )
                 print(
                     json.dumps(
                         {
@@ -3156,6 +4000,13 @@ def main() -> int:
                 return 1
             processed_files = [item["output"] for item in processed]
             postprocess_manifest = str(Path(processed_dir).resolve() / "postprocess-manifest.json")
+            update_idempotency_local_stage(
+                idempotency_record,
+                task_id,
+                files,
+                processed_files=processed_files,
+                postprocess_manifest=postprocess_manifest,
+            )
             actual_size = (
                 f"{processed[0]['output_width']}×{processed[0]['output_height']}"
                 if processed
@@ -3232,30 +4083,24 @@ def main() -> int:
             output_dir,
             task_id,
             request_started_at_ms,
+            cleanup_paths=[idempotency_record],
         )
         return 0
     except ImageGenError as exc:
-        _fail_story_page(story_path, task_id, str(exc))
-        # HTTP 503/429/5xx from the image endpoint is returned as the current
-        # request's error and is not reused for a later healthy request.  A
-        # transport timeout or an unknown post-submit failure remains
-        # ``uncertain`` to prevent a duplicate paid submission.
-        transient_upstream_failure = exc.retryable and exc.status_code in {
-            408,
-            425,
-            429,
-            500,
-            502,
-            503,
-            504,
-        }
+        # A concrete HTTP response or terminal task status is final. Only a
+        # post-submit outcome that cannot be confirmed retains recovery state.
+        uncertain = (request_submitted or exc.request_may_have_been_sent) and not (
+            exc.known_terminal
+        )
+        if story_state_owned and not uncertain:
+            _fail_story_page(story_path, task_id, str(exc))
         finish_idempotency(
             idempotency_record,
             idempotency_lock,
             idempotency_fingerprint,
             task_id,
             error=str(exc),
-            uncertain=request_submitted and not transient_upstream_failure,
+            uncertain=uncertain,
         )
         print(
             json.dumps(

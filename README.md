@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.89**
+Current release: **v1.8.90**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.89](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.89.zip)
+[下载 Matrixapi-imagegen v1.8.90](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.90.zip)
 
 解压后按系统运行安装程序：
 
@@ -27,6 +27,8 @@ Current release: **v1.8.89**
 8K 等大结果采用流式保存：状态查询只接收小型任务 JSON，完成后的图片分块写入临时文件并校验后原子保存。不会因图片大于旧的内存读取上限而重新提交、重复扣费或降低请求尺寸。
 
 成功返回会在图片链接下显示最终图片的真实像素尺寸、比例和画质；这只是本地回显，不增加任何上游请求或等待时间。
+
+v1.8.90 修复 Windows 多图任务的 UTF-8/GBK 交接错误，并加强逐张结果校验。每张图完成后立即回传，不等待整组完成；新任务不再按相同提示词复用旧图。成功和明确失败的临时 JSON 会在结果交付后自动清理；提交阶段的 HTTP 408/5xx 或未知传输中断会为该 task-id 保留最小恢复记录，避免重复请求和重复扣费。明确的其他 4xx（包括 429）仍按当前任务终态处理。
 
 安装位置：
 
@@ -187,11 +189,13 @@ that new task is reported once using its own actual response.
 ## Current-task result delivery
 
 Every generation or edit command uses a unique `--task-id`. The script writes one
-atomic JSON record containing that task ID, request start/completion timestamps,
-and the exact image paths, while returning the same JSON on stdout. Codex uses
-only that current stdout result and never scans an image directory for a newer
-file. On Windows the JSON record is hidden shortly after stdout delivery without
-blocking the command or delaying image display.
+transient atomic JSON handoff containing that task ID, request start/completion
+timestamps, and exact image paths while returning the same JSON on stdout. Codex
+uses only that current stdout result and never scans an image directory for a
+newer file. After stdout delivery, successful and known-failed task JSON is
+removed automatically; Windows performs that cleanup in the background without
+blocking the command or delaying image display. A genuinely unknown submitted
+task keeps only the recovery metadata needed to prevent a duplicate paid POST.
 
 Async 2K/4K/8K commands may run for several minutes. If the shell tool yields a
 running session/cell instead of an exit code, that is progress, not an image

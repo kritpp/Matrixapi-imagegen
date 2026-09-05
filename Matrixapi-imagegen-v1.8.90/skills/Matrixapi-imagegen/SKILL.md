@@ -33,9 +33,9 @@ Generate or edit images with the bundled script and show the saved result to the
    Generate a fresh `--task-id` for every new generation. If a command is
    interrupted before its terminal result is written, retry/reconnect with the
    **same** task id so the ledger can recover the original handoff; do not
-   invent a new task id to recover it. If a task result JSON already exists,
-   do not rerun the task: use the original command's result or report that the
-   handoff needs recovery. Reference images are scoped to the current request, not the
+   invent a new task id to recover it. If a transient task result still exists,
+   reuse the original command and exact task id so the script can re-emit that
+   handoff without another paid POST. Reference images are scoped to the current request, not the
    whole conversation. Do not pass every image mentioned earlier. For a new
    page or variant, use the explicitly requested current-turn references and,
    only when the request is an edit, the exact latest generated output from
@@ -48,7 +48,7 @@ Generate or edit images with the bundled script and show the saved result to the
 
    **Running-command rule:** an async image command commonly outlives the shell tool's first yield. If the command returns a running `session_id`, cell ID, or equivalent "still running" state instead of a process exit code and terminal JSON, immediately wait/poll that exact execution session (for example with the shell session's wait or stdin-poll operation) and continue until it exits. A running session is not an error and is not a user-facing result. Do not say that the model returned no confirmed result, do not end the Codex turn, do not launch a second generation, and do not change channels while the original process is alive. Status polling is free and the original paid submit must occur exactly once.
 
-   **Reconnect recovery rule:** before the paid POST, the script persists the request context and task id in its hidden idempotency ledger. Immediately after a successful submit it persists the upstream task id and status base URL. If Codex is interrupted and reconnects, the next identical invocation first acquires the original task lock and checks the exact task-id image filename or polls the saved upstream task id; it never submits a second POST. A locally completed image is authoritative even when the upstream status lookup later returns 404. New result images are stored directly in the shared `generated_images/Matrixapi-imagegen` folder with a unique task-id filename; incomplete downloads stay in hidden `.staging` and are never exposed as empty task folders. Legacy task directories from older Skills remain readable for recovery. Temporary state is removed only after the current result has been emitted; delivered image files remain available for the download link.
+   **Reconnect recovery rule:** before the paid POST, the script persists the request context and task id in its hidden idempotency ledger. Immediately after a successful submit it persists the upstream task id and status base URL. Recovery is bound to that exact task id, never merely to a matching prompt or conversation. If Codex is interrupted and reconnects, the same task checks its exact image filename or polls the saved upstream task id; it never submits a second POST. A locally completed image is authoritative even when the upstream status lookup later returns 404. New result images are stored directly in the shared `generated_images/Matrixapi-imagegen` folder with a unique task-id filename; incomplete downloads stay in hidden `.staging` and are never exposed as empty task folders. Legacy task directories from older Skills remain readable for recovery. Successful and known-failed task JSON is removed after terminal stdout handoff; only a genuinely unknown submitted task keeps the minimum recovery record until its outcome can be confirmed. Delivered image files remain available for the download link.
 
    **New-conversation isolation (hard rule):** a new conversation or a new
    generation must never use an old `preview_files` path. Do not list, search,
@@ -59,9 +59,8 @@ Generate or edit images with the bundled script and show the saved result to the
    explicitly asks to edit/recover that image. If a command reports
    `idempotency_reused`, render it only when the user explicitly asked to
    recover the same task; otherwise stop and report the mismatch instead of
-   presenting that file as the new result. The script trusts only
-   `CODEX_THREAD_ID` as a conversation boundary; when it is unavailable,
-   idempotency is bound to the exact task id, not the shared desktop session.
+   presenting that file as the new result. Idempotency is always bound to the
+   exact task id, not a shared desktop session, conversation, or matching prompt.
 
    When the user explicitly requests N ordered outputs (for example all 8 named roles in a document), N is a completion requirement: do not stop after an arbitrary subset and do not ask which item to begin with. Resolve the supplied document order, use its first item when no order is written, and submit every requested item exactly once. For independent roles/assets, create the N exact command argument lists in a temporary UTF-8 JSON plan and run `sequence_runner.py --plan-file <plan>` once. It executes the full list in one local process, flushes a result event after each image, stops only on an actual failed item, and never submits a completed item twice.
 
@@ -83,7 +82,7 @@ Generate or edit images with the bundled script and show the saved result to the
    force a square/3:2 canvas, and do not perform local redraw or post-processing.
    Only an explicit request for a new variant may use `--force-new`; the normal
    edit must preserve the upstream-returned image and dimensions.
-9. First wait for the current command to actually exit. Tool yield limits (including a roughly 55-second yield) are not generation timeouts. While the shell reports the process/session is still running, keep waiting on the same session and do not produce a final assistant response. After exit, parse only the terminal JSON written to stdout by that command. Accept it only when `ok` is true, its `task_id` exactly equals the command's `--task-id`, `result_match.task_id` matches it, and `completed_at_ms` is not earlier than `request_started_at_ms`. Use its `preview_files` immediately; do not open or scan the output directory, search for a newer file, reread the result JSON with another shell command, inspect dimensions, or run another verification command. The script atomically writes that same task-scoped JSON and, on Windows, schedules it to become hidden after stdout has been delivered; this background hide does not delay command completion. Once a successful result is received, end the image-generation action immediately: do not call `/v1/responses` again, do not send the same prompt or images again, and do not invoke any extra image/view/verification command. The final response must render the returned `preview_files` and link `download_files` directly. For each output, render both the inline preview and a clickable original-image link, using the normalized absolute paths from `preview_files` and `download_files`:
+9. First wait for the current command to actually exit. Tool yield limits (including a roughly 55-second yield) are not generation timeouts. While the shell reports the process/session is still running, keep waiting on the same session and do not produce a final assistant response. After exit, parse only the terminal JSON written to stdout by that command. Accept it only when `ok` is true, its `task_id` exactly equals the command's `--task-id`, `result_match.task_id` matches it, and `completed_at_ms` is not earlier than `request_started_at_ms`. Use its `preview_files` immediately; do not open or scan the output directory, search for a newer file, reread a result JSON with another shell command, inspect dimensions, or run another verification command. The task-scoped handoff JSON is transient and is removed after stdout delivery; this cleanup is local, asynchronous on Windows, and does not delay image display. Once a successful result is received, end the image-generation action immediately: do not call `/v1/responses` again, do not send the same prompt or images again, and do not invoke any extra image/view/verification command. The final response must render the returned `preview_files` and link `download_files` directly. For each output, render both the inline preview and a clickable original-image link, using the normalized absolute paths from `preview_files` and `download_files`:
    `![generated image](C:/.../image.png)`
    `[点击打开或下载原图](C:/.../image.png)`
    Then print the terminal result's `display_summary` on its own line directly
@@ -104,11 +103,12 @@ Generate or edit images with the bundled script and show the saved result to the
    resend the old task. If the current upstream explicitly refuses again,
    report only that new response once.
 
-   HTTP 503/429/5xx from the image submit endpoint is request-scoped: report that
-   current upstream error once, do not submit the same image request again, and
-   do not persist it as a reusable/uncertain result. The next customer request
-   must perform a fresh upstream check. Only a post-submit timeout or unknown
-   transport failure may remain `uncertain` for duplicate-charge protection.
+   HTTP 408/5xx from the image submit endpoint can arrive after the upstream has
+   accepted a paid request. Preserve that exact task as `uncertain`, report the
+   error once, and never repeat its image POST; a reconnect may only recover the
+   saved task/status. Explicit other 4xx responses, including 429, are terminal
+   for that task and are not retained as reusable failures. A later customer
+   request is a fresh task id and performs its own upstream check.
 
    User-visible wording: say “模型”, “模型服务”, or “中转站” for normal status and errors. Say “模型明确拒绝” only when the response explicitly contains a content, copyright, trademark, safety, moderation, or other policy refusal; a generic 400 is an unknown error.
 
@@ -205,11 +205,12 @@ The check reports only whether a supported configuration was found, its generic 
 
 ### Internal files and prompt-file handling
 
-The `.idempotency` ledger is required for duplicate-charge protection. Keep it
-in the output directory, mark the directory hidden on Windows, and never show
-its filenames or contents in the Codex response. Do not delete it merely to
-make a new generation; use a fresh task and `--force-new` when the customer
-explicitly requests a new variant.
+The `.idempotency` ledger is required while a paid task is active or its final
+state is unknown. Keep the directory hidden on Windows and never show its
+filenames or contents in the Codex response. Successful and known-failed
+records are cleaned after terminal handoff; never delete an unknown record just
+to make a retry. Use a fresh task and `--force-new` only when the customer
+explicitly confirms a new paid variant.
 
 When a long or quoted prompt is supplied through `--prompt-file`, use a
 short-lived file in the system temporary directory rather than the project
@@ -236,9 +237,8 @@ is unknown, block the identical retry and ask for confirmation before using
 not an uncertain record and is deleted before a later explicit new task; never
 silently treat “再生成” as a cached-result lookup or a historical refusal.
 
-Each API request is keyed by a deterministic fingerprint containing the current
-Codex thread (or, when no thread id is available, the exact task id), prompt,
-model, mode, size, quality, count, and the ordered reference-image content
+Each API request is keyed by a deterministic fingerprint containing the exact
+task id, prompt, model, mode, size, quality, count, and the ordered reference-image content
 (content digests, not temporary clipboard paths). The script's existing
 idempotency record and lock are still required for crash/retry protection;
 only the user-intent routing above decides whether a fresh task is allowed. If
