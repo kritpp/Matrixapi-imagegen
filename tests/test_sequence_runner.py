@@ -45,7 +45,7 @@ def _success(task_id: str) -> dict:
         "request_started_at_ms": 100,
         "completed_at_ms": 101,
         "result_match": {"task_id": task_id},
-        "display_summary": "实际尺寸：1672×941｜比例：16:9｜画质：high",
+        "display_summary": "实际尺寸：1672×941｜比例：16:9",
         "preview_files": [f"C:/generated/{task_id}.png"],
         "download_files": [f"C:/generated/{task_id}.png"],
     }

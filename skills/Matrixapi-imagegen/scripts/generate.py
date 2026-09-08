@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.91"
+SKILL_VERSION = "1.8.92"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -3050,13 +3050,16 @@ def format_display_summary(
     quality: str,
     aspect_ratio: str,
 ) -> str:
-    """Build the local-only metadata line shown beside a delivered image."""
+    """Build the local-only size/ratio line shown beside a delivered image.
+
+    Quality is intentionally omitted because the relay may normalize it for a
+    provider, so showing the caller's local value can mislead customers.
+    """
     actual = str(actual_size or "").strip().replace("X", "×").replace("x", "×")
     if not actual or actual.upper() in SIZE_ALIASES:
         actual = "未知"
     parts = [f"实际尺寸：{actual}"]
     parts.append(f"比例：{str(aspect_ratio or 'auto').strip() or 'auto'}")
-    parts.append(f"画质：{str(quality or 'auto').strip() or 'auto'}")
     return "｜".join(parts)
 
 
@@ -4125,3 +4128,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

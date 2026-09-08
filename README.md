@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.91**
+Current release: **v1.8.92**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.91](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.91/Matrixapi-imagegen-v1.8.91.zip)
+[下载 Matrixapi-imagegen v1.8.92](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.92/Matrixapi-imagegen-v1.8.92.zip)
 
 解压后按系统运行安装程序：
 
@@ -28,7 +28,7 @@ Current release: **v1.8.91**
 
 成功返回会在图片链接下显示最终图片的真实像素尺寸、比例和画质；这只是本地回显，不增加任何上游请求或等待时间。
 
-v1.8.91 明确区分 600 秒本地等待上限与上游终态：本地等待结束不会被当作失败或退款依据，并保留同一 task-id 供后续只读状态恢复；不会重新提交付费请求。只有中转站确认同一上游任务最终失败、取消、过期或明确不存在时才允许退款，排队、处理中、网络错误与 5xx 均保持结果未知且不退款。
+v1.8.92 明确区分 600 秒本地等待上限与上游终态：本地等待结束不会被当作失败或退款依据，并保留同一 task-id 供后续只读状态恢复；不会重新提交付费请求。只有中转站确认同一上游任务最终失败、取消、过期或明确不存在时才允许退款，排队、处理中、网络错误与 5xx 均保持结果未知且不退款。
 
 安装位置：
 
@@ -229,3 +229,4 @@ python skills/Matrixapi-imagegen/scripts/generate.py --task-id task-example-0002
 ```
 
 Never commit API keys or other credentials to this repository.
+

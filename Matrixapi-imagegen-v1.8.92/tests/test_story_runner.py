@@ -70,7 +70,7 @@ def _story_success(
         "request_started_at_ms": 100 + page,
         "completed_at_ms": 200 + page,
         "result_match": {"task_id": task_id},
-        "display_summary": "实际尺寸：1672×941｜比例：2:3｜画质：high",
+        "display_summary": "实际尺寸：1672×941｜比例：2:3",
         "preview_files": [f"C:/generated/{task_id}.png"],
         "download_files": [f"C:/generated/{task_id}.png"],
         "story": story,

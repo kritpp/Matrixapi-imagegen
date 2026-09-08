@@ -708,7 +708,7 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             self.assertEqual(result["preview_files"], [image.resolve().as_posix()])
             self.assertEqual(
                 result["display_summary"],
-                "实际尺寸：1672×941｜比例：16:9｜画质：high",
+                "实际尺寸：1672×941｜比例：16:9",
             )
             status_get.assert_not_called()
 
