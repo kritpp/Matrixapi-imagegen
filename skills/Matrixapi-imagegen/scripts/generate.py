@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
 DEFAULT_MODEL = "gpt-image-2"
 SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.90"
+SKILL_VERSION = "1.8.91"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -1197,7 +1197,11 @@ def wait_for_task(
         # one-second interval avoids the old multi-second handoff delay while
         # keeping a single status request in flight.
         time.sleep(1)
-    raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
+    raise ImageGenError(
+        f"Image task is still unresolved after {timeout} seconds: {task_id}. "
+        "This local wait limit is not an upstream failure or refund decision; "
+        "the same task id was preserved for status-only recovery and was not submitted again"
+    )
 
 
 def response_requires_task_polling(result: dict[str, Any]) -> bool:

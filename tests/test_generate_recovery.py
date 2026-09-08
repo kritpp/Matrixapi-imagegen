@@ -379,6 +379,48 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             self.assertEqual(saved["request_context"]["model"], "gpt-image-2")
             self.assertFalse(lock.exists())
 
+    def test_local_wait_limit_is_not_reported_as_terminal_upstream_failure(self) -> None:
+        with mock.patch.object(generate.time, "monotonic", side_effect=[0, 1]):
+            with self.assertRaises(generate.ImageGenError) as raised:
+                generate.wait_for_task(
+                    {"task_id": "upstream-still-pending", "status": "queued"},
+                    "https://relay.test/v1/images/generations",
+                    "secret",
+                    1,
+                )
+        message = str(raised.exception)
+        self.assertIn("still unresolved", message)
+        self.assertIn("not an upstream failure or refund decision", message)
+        self.assertFalse(raised.exception.known_terminal)
+
+    def test_status_transport_error_is_not_terminal(self) -> None:
+        with mock.patch.object(
+            generate.urllib.request,
+            "urlopen",
+            side_effect=TimeoutError("status read timed out"),
+        ):
+            with self.assertRaises(generate.ImageGenError) as raised:
+                generate._get_image_request(
+                    "https://relay.test/v1/status/upstream-1234", "secret", 10
+                )
+        self.assertFalse(raised.exception.known_terminal)
+
+    def test_status_503_is_not_terminal(self) -> None:
+        response = generate.urllib.error.HTTPError(
+            "https://relay.test/v1/status/upstream-1234",
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":{"message":"temporary"}}'),
+        )
+        with mock.patch.object(generate.urllib.request, "urlopen", side_effect=response):
+            with self.assertRaises(generate.ImageGenError) as raised:
+                generate._get_image_request(
+                    "https://relay.test/v1/status/upstream-1234", "secret", 10
+                )
+        self.assertFalse(raised.exception.known_terminal)
+        self.assertTrue(raised.exception.retryable)
+
     def test_uncertain_write_failure_retains_process_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)

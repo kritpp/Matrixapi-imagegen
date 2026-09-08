@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.90**
+Current release: **v1.8.91**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.90](https://github.com/kritpp/Matrixapi-imagegen/raw/refs/heads/main/Matrixapi-imagegen-v1.8.90.zip)
+[下载 Matrixapi-imagegen v1.8.91](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.91/Matrixapi-imagegen-v1.8.91.zip)
 
 解压后按系统运行安装程序：
 
@@ -28,7 +28,7 @@ Current release: **v1.8.90**
 
 成功返回会在图片链接下显示最终图片的真实像素尺寸、比例和画质；这只是本地回显，不增加任何上游请求或等待时间。
 
-v1.8.90 修复 Windows 多图任务的 UTF-8/GBK 交接错误，并加强逐张结果校验。每张图完成后立即回传，不等待整组完成；新任务不再按相同提示词复用旧图。成功和明确失败的临时 JSON 会在结果交付后自动清理；提交阶段的 HTTP 408/5xx 或未知传输中断会为该 task-id 保留最小恢复记录，避免重复请求和重复扣费。明确的其他 4xx（包括 429）仍按当前任务终态处理。
+v1.8.91 明确区分 600 秒本地等待上限与上游终态：本地等待结束不会被当作失败或退款依据，并保留同一 task-id 供后续只读状态恢复；不会重新提交付费请求。只有中转站确认同一上游任务最终失败、取消、过期或明确不存在时才允许退款，排队、处理中、网络错误与 5xx 均保持结果未知且不退款。
 
 安装位置：
 
