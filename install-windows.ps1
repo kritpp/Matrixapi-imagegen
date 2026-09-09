@@ -34,7 +34,7 @@ if ([string]::IsNullOrWhiteSpace($apiKey)) {
     throw "An API key is required."
 }
 
-$model = "gpt-image-2"
+$model = "gpt-image-2.5-flare"
 [Environment]::SetEnvironmentVariable("IMAGEGEN_API_KEY", $apiKey, "User")
 [Environment]::SetEnvironmentVariable("IMAGEGEN_MODEL", $model, "User")
 $env:IMAGEGEN_API_KEY = $apiKey
@@ -51,6 +51,6 @@ Write-Host "Install location: $target"
 Write-Host "API URL is fixed inside the Skill: https://matrixapii.com"
 Write-Host "Installed version: 1.8.92"
 Write-Host "Current model: $model"
-Write-Host "Supported models: gpt-image-2, gemini-3-pro-image"
+Write-Host "Supported models: gpt-image-2.5-flare, gpt-image-2.5-sunburst, gpt-image-2, gemini-3-pro-image"
 Read-Host "Press Enter to close"
 

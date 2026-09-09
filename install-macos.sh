@@ -30,12 +30,12 @@ fi
 umask 077
 {
   printf 'IMAGEGEN_API_KEY=%s\n' "$API_KEY"
-  printf '%s\n' 'IMAGEGEN_MODEL=gpt-image-2'
+  printf '%s\n' 'IMAGEGEN_MODEL=gpt-image-2.5-flare'
 } > "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
 
 IMAGEGEN_API_KEY="$API_KEY" \
-IMAGEGEN_MODEL="gpt-image-2" \
+IMAGEGEN_MODEL="gpt-image-2.5-flare" \
 python3 "$TARGET/scripts/generate.py" --check-config
 
 echo ""
@@ -43,7 +43,7 @@ echo "Matrixapi-imagegen was installed for Codex. Restart Codex before using it.
 echo "Install location: $TARGET"
 echo "API URL is fixed inside the Skill: https://matrixapii.com"
 echo "Installed version: 1.8.92"
-echo "Current model: gpt-image-2"
-echo "Supported models: gpt-image-2, gemini-3-pro-image"
+echo "Current model: gpt-image-2.5-flare"
+echo "Supported models: gpt-image-2.5-flare, gpt-image-2.5-sunburst, gpt-image-2, gemini-3-pro-image"
 read -r -p "Press Enter to close..."
 
