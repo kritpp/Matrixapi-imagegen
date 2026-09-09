@@ -44,7 +44,7 @@ GPT_IMAGE_MODELS = {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburs
 LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
 GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.92"
+SKILL_VERSION = "1.8.93"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -443,14 +443,22 @@ def mask_support_enabled(model: str) -> bool:
 
 
 MODEL_2_SUFFIX_RE = re.compile(r"\s*模型\s*[-－—]?\s*2\s*$", re.IGNORECASE)
+MODEL_SUNBURST_SUFFIX_RE = re.compile(
+    r"\s*模型\s*[-－—]?\s*s2\.5\s*$", re.IGNORECASE
+)
 
 
 def select_model_from_prompt(
     model: str, prompt: str, *, explicit_model: bool = False
 ) -> tuple[str, str]:
-    """Apply the customer-facing ``模型-2`` suffix without exposing aliases."""
+    """Apply short customer-facing model suffixes without exposing aliases."""
     if explicit_model or not prompt:
         return model, prompt
+    if MODEL_SUNBURST_SUFFIX_RE.search(prompt):
+        cleaned = MODEL_SUNBURST_SUFFIX_RE.sub("", prompt).rstrip()
+        if not cleaned:
+            raise ImageGenError("模型-s2.5 标记后必须提供图片描述")
+        return "gpt-image-2.5-sunburst", cleaned
     if not MODEL_2_SUFFIX_RE.search(prompt):
         return model, prompt
     cleaned = MODEL_2_SUFFIX_RE.sub("", prompt).rstrip()

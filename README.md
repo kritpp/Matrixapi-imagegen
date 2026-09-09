@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.92**
+Current release: **v1.8.93**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.92](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.92/Matrixapi-imagegen-v1.8.92.zip)
+[下载 Matrixapi-imagegen v1.8.93](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.93/Matrixapi-imagegen-v1.8.93.zip)
 
 解压后按系统运行安装程序：
 
@@ -75,7 +75,8 @@ export IMAGEGEN_MODEL="gpt-image-2.5-flare"
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
 `https://matrixapii.com`。支持 `gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、
-`gpt-image-2` 和 `gemini-3-pro-image`。提示词末尾写 `模型-2` 可选择 `gpt-image-2`；
+`gpt-image-2` 和 `gemini-3-pro-image`。提示词末尾写 `模型-2` 可选择 `gpt-image-2`，写
+`模型-s2.5` 可选择 `gpt-image-2.5-sunburst`；
 当 2.5 模型所在老分组明确返回模型/渠道不可用时，Skill 只自动回退一次到 `gpt-image-2`，
 普通 502/503 或可能已送达上游的错误不会重试。需要 Pro 时，把 `IMAGEGEN_MODEL` 改为
 `gemini-3-pro-image`。
