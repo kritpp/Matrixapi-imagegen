@@ -44,7 +44,12 @@ REQUIRED_FILES = (
 )
 FIXED_BASE_URL = "https://matrixapii.com"
 FIXED_BASE_HOST = "matrixapii.com"
-SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
+SUPPORTED_MODELS = (
+    "gpt-image-2",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+    "gemini-3-pro-image",
+)
 
 
 class UpdateError(RuntimeError):
@@ -191,6 +196,16 @@ def _archive_version(url: str) -> str:
     return ".".join(match.groups())
 
 
+def _version_key(version: str) -> tuple[int, ...]:
+    try:
+        parts = tuple(int(part) for part in str(version).split("."))
+    except (TypeError, ValueError) as exc:
+        raise UpdateError(f"Invalid Skill version: {version}") from exc
+    if not parts or any(part < 0 for part in parts):
+        raise UpdateError(f"Invalid Skill version: {version}")
+    return parts
+
+
 def _validate_staged_skill(staged: Path, expected_version: str) -> None:
     for required in REQUIRED_FILES:
         if not (staged / required).is_file():
@@ -312,6 +327,11 @@ def update_skill(archive_url: str, target: Path) -> dict:
             lock_file.write(str(os.getpid()))
         archive_urls = (archive_url,) if archive_url else _resolve_archive_urls()
         expected_version = _archive_version(archive_urls[0])
+        installed_before = _installed_check(target)
+        installed_version = str(installed_before.get("skill_version") or "")
+        if installed_version and _version_key(expected_version) <= _version_key(installed_version):
+            installed_before["_update_skipped"] = True
+            return installed_before
         archive_data = _download_archive(archive_urls)
         with tempfile.TemporaryDirectory(
             prefix=".matrixapi-imagegen-update-", dir=str(target.parent)
@@ -353,25 +373,32 @@ def main() -> int:
     target = args.target or Path(__file__).resolve().parents[1]
     try:
         installed = update_skill(args.archive_url, target)
+        update_skipped = bool(installed.pop("_update_skipped", False))
         installed_version = installed.get("skill_version")
         current_model = installed.get("model")
         supported_models = installed.get("supported_models", list(SUPPORTED_MODELS))
+        restart_message = "无需重启 Codex。" if update_skipped else "请重启 Codex。"
         print(
             json.dumps(
                 {
                     "ok": True,
-                    "updated": True,
+                    "updated": not update_skipped,
                     "installed_version": installed_version,
                     "current_model": current_model,
                     "selected_model": current_model,
                     "supported_models": supported_models,
                     "display_message": (
-                        f"Matrixapi-imagegen {installed_version} 已更新成功；"
+                        (
+                            f"Matrixapi-imagegen {installed_version} 已是当前版本，未覆盖本地技能；"
+                            if update_skipped
+                            else f"Matrixapi-imagegen {installed_version} 已更新成功；"
+                        )
+                        +
                         f"当前模型：{current_model}；"
                         f"支持模型：{', '.join(str(item) for item in supported_models)}；"
-                        "请重启 Codex。"
+                        + restart_message
                     ),
-                    "restart_required": True,
+                    "restart_required": not update_skipped,
                 },
                 ensure_ascii=False,
             )

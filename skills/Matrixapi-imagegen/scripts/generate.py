@@ -33,8 +33,16 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
     from .reference_pack import ReferencePackError, pack_yaliai_references
 
 
-DEFAULT_MODEL = "gpt-image-2"
-SUPPORTED_MODELS = ("gpt-image-2", "gemini-3-pro-image")
+DEFAULT_MODEL = "gpt-image-2.5-flare"
+SUPPORTED_MODELS = (
+    "gpt-image-2",
+    "gpt-image-2.5-flare",
+    "gpt-image-2.5-sunburst",
+    "gemini-3-pro-image",
+)
+GPT_IMAGE_MODELS = {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
+LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
+GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
 SKILL_VERSION = "1.8.92"
 DEFAULT_BASE_URL = "https://matrixapii.com"
@@ -100,12 +108,17 @@ class ImageGenError(RuntimeError):
         retryable: bool = False,
         known_terminal: bool = False,
         request_may_have_been_sent: bool = False,
+        safe_model_route_failure: bool = False,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
         self.known_terminal = known_terminal
         self.request_may_have_been_sent = request_may_have_been_sent
+        # True only when the relay explicitly rejected the selected model or
+        # channel before dispatching an image request upstream. This is the
+        # sole condition that permits the one-time 2.5 -> 2 fallback.
+        self.safe_model_route_failure = safe_model_route_failure
 
 
 CONTENT_POLICY_MARKERS = (
@@ -132,6 +145,8 @@ ROUTE_MARKERS = (
     "无可用渠道",
     "无可用模型",
     "模型不存在",
+    "没有可用的上游图像服务",
+    "no available upstream image service",
 )
 
 PROMPT_LENGTH_MARKERS = (
@@ -288,6 +303,38 @@ def _format_upstream_error(detail: str, status_code: int | None = None) -> str:
     return f"{status} [{category}] {explanation} 原始信息: {raw}"
 
 
+def _is_safe_model_route_failure(
+    detail: str, status_code: int | None
+) -> bool:
+    """Recognize only an explicit pre-dispatch model/channel routing failure."""
+    if status_code not in {400, 404, 422, 503}:
+        return False
+    normalized = (detail or "").lower()
+    return any(marker.lower() in normalized for marker in ROUTE_MARKERS)
+
+
+def _can_fallback_to_legacy_model(
+    model: str, error: ImageGenError
+) -> bool:
+    """Allow one 2.5 -> 2 fallback only when dispatch is known not to have happened."""
+    return bool(
+        model in GPT_IMAGE_2_5_MODELS
+        and error.safe_model_route_failure
+        and not error.request_may_have_been_sent
+        and error.status_code in {400, 404, 422, 503}
+    )
+
+
+def _fallback_model_idempotency_key(original_key: str, model: str) -> str:
+    if not original_key:
+        return ""
+    return hashlib.sha256(
+        f"{original_key}:legacy-model-fallback:{model}:{LEGACY_GPT_IMAGE_MODEL}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
 def _environment_value(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if value:
@@ -390,9 +437,26 @@ def _hide_directory(path: Path) -> None:
 
 def mask_support_enabled(model: str) -> bool:
     """Return whether a model's local mask path was explicitly enabled."""
-    if model not in {"gpt-image-2"}:
+    if model not in GPT_IMAGE_MODELS:
         return True
     return _environment_value(MASK_SUPPORT_ENV).lower() in {"1", "true", "yes"}
+
+
+MODEL_2_SUFFIX_RE = re.compile(r"\s*模型\s*[-－—]?\s*2\s*$", re.IGNORECASE)
+
+
+def select_model_from_prompt(
+    model: str, prompt: str, *, explicit_model: bool = False
+) -> tuple[str, str]:
+    """Apply the customer-facing ``模型-2`` suffix without exposing aliases."""
+    if explicit_model or not prompt:
+        return model, prompt
+    if not MODEL_2_SUFFIX_RE.search(prompt):
+        return model, prompt
+    cleaned = MODEL_2_SUFFIX_RE.sub("", prompt).rstrip()
+    if not cleaned:
+        raise ImageGenError("模型-2 标记后必须提供图片描述")
+    return "gpt-image-2", cleaned
 
 
 def selected_provider(value: str | None) -> str:
@@ -778,7 +842,7 @@ def source_preserving_edit_size(size: str, image_paths: list[str]) -> str:
 
 def edit_working_size(size: str, model: str) -> str:
     """Return the edit size, preserving native GPT Image 2 tiers by default."""
-    if model in {"gpt-image-2"} and not _environment_value(
+    if model in GPT_IMAGE_MODELS and not _environment_value(
         "IMAGEGEN_LEGACY_EDIT_RESIZE"
     ).lower() in {"1", "true", "yes"}:
         return size
@@ -988,16 +1052,24 @@ def _post_image_request(
             raw = _read_limited(response, MAX_RESPONSE_BYTES)
     except urllib.error.HTTPError as exc:
         detail = _safe_http_detail(exc, key)
-        ambiguous_submit = exc.code == 408 or 500 <= exc.code <= 599
+        safe_model_route_failure = _is_safe_model_route_failure(detail, exc.code)
+        ambiguous_submit = (
+            (exc.code == 408 or 500 <= exc.code <= 599)
+            and not safe_model_route_failure
+        )
         # A gateway can return 408/5xx after the paid request reached the
-        # upstream. Keep the exact task fail-closed; explicit other 4xx
-        # responses (including 429) are terminal for this attempt.
+        # upstream. Keep the exact task fail-closed. The only exception is an
+        # explicit model/channel routing rejection, which the relay identifies
+        # before dispatch and which may safely trigger the one-time legacy
+        # model fallback. Explicit other 4xx responses (including 429) are
+        # terminal for this attempt.
         raise ImageGenError(
             _format_upstream_error(detail, exc.code),
             status_code=exc.code,
             retryable=exc.code in {408, 425, 429} or 500 <= exc.code <= 599,
             known_terminal=not ambiguous_submit,
             request_may_have_been_sent=ambiguous_submit,
+            safe_model_route_failure=safe_model_route_failure,
         ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ImageGenError(
@@ -1197,11 +1269,7 @@ def wait_for_task(
         # one-second interval avoids the old multi-second handoff delay while
         # keeping a single status request in flight.
         time.sleep(1)
-    raise ImageGenError(
-        f"Image task is still unresolved after {timeout} seconds: {task_id}. "
-        "This local wait limit is not an upstream failure or refund decision; "
-        "the same task id was preserved for status-only recovery and was not submitted again"
-    )
+    raise ImageGenError(f"Image task timed out after {timeout} seconds: {task_id}")
 
 
 def response_requires_task_polling(result: dict[str, Any]) -> bool:
@@ -2598,6 +2666,10 @@ def _recovery_payload(
         "task_id": task_id,
         "mode": mode,
         "model": str(context.get("model") or DEFAULT_MODEL),
+        "actual_model": str(
+            context.get("actual_model") or context.get("model") or DEFAULT_MODEL
+        ),
+        "model_fallback": context.get("model_fallback"),
         "provider": str(context.get("provider") or "auto"),
         "count": len(files),
         "size": size,
@@ -3201,7 +3273,10 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Read UTF-8 prompt text from a file; avoids shell quoting errors on Windows",
     )
-    parser.add_argument("--model", help="Model id; defaults to IMAGEGEN_MODEL or gpt-image-2")
+    parser.add_argument(
+        "--model",
+        help="Official model id; defaults to IMAGEGEN_MODEL or gpt-image-2.5-flare",
+    )
     parser.add_argument(
         "--provider",
         choices=("auto", "yaliai"),
@@ -3526,6 +3601,7 @@ def main() -> int:
             return 0
 
         base_url, key, model, source = discover_credentials()
+        model_explicit = bool(args.model)
         model = (args.model or model).strip()
         generation_url = generation_endpoint(base_url)
         edit_url = edit_endpoint(base_url)
@@ -3578,6 +3654,12 @@ def main() -> int:
             raw_prompt = (args.prompt or "").strip()
         if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
+        model, raw_prompt = select_model_from_prompt(
+            model, raw_prompt, explicit_model=model_explicit
+        )
+        requested_model = model
+        actual_model = model
+        model_fallback = None
         original_prompt_chars = len(raw_prompt)
         # Never alter a customer prompt locally.  Compression can discard
         # constraints and exact wording, producing an unrelated image.  The
@@ -3647,10 +3729,9 @@ def main() -> int:
                 raise ImageGenError("--metadata must be a JSON object")
         else:
             metadata = None
-        if image_paths and (args.stream or args.async_mode) and model not in {
-            "gpt-image-2",
-            "gemini-3-pro-image",
-        }:
+        if image_paths and (args.stream or args.async_mode) and model not in (
+            GPT_IMAGE_MODELS | {"gemini-3-pro-image"}
+        ):
             raise ImageGenError(
                 "This relay only supports --stream/--async for local GPT Image 2 edits"
             )
@@ -3766,7 +3847,9 @@ def main() -> int:
         )
         request_context = {
             "mode": mode,
-            "model": model,
+            "model": requested_model,
+            "actual_model": actual_model,
+            "model_fallback": model_fallback,
             "provider": provider,
             "size": size,
             "requested_size": requested_size,
@@ -3885,19 +3968,41 @@ def main() -> int:
                 options["stream"] = "true"
             if async_mode:
                 options["async"] = "true"
-            result = call_edit_api(
-                edit_url,
-                key,
-                model,
-                prompt,
-                size,
-                args.n,
-                request_image_paths,
-                args.mask,
-                args.timeout,
-                options,
-                idempotency_fingerprint,
-            )
+            try:
+                result = call_edit_api(
+                    edit_url,
+                    key,
+                    model,
+                    prompt,
+                    size,
+                    args.n,
+                    request_image_paths,
+                    args.mask,
+                    args.timeout,
+                    options,
+                    idempotency_fingerprint,
+                )
+            except ImageGenError as exc:
+                # Legacy GPT Image 2 edit routes support one output only.
+                if args.n != 1 or not _can_fallback_to_legacy_model(model, exc):
+                    raise
+                result = call_edit_api(
+                    edit_url,
+                    key,
+                    LEGACY_GPT_IMAGE_MODEL,
+                    prompt,
+                    size,
+                    args.n,
+                    request_image_paths,
+                    args.mask,
+                    args.timeout,
+                    options,
+                    _fallback_model_idempotency_key(idempotency_fingerprint, model),
+                )
+                actual_model = LEGACY_GPT_IMAGE_MODEL
+                model_fallback = "legacy_group_no_2_5"
+                request_context["actual_model"] = actual_model
+                request_context["model_fallback"] = model_fallback
             request_submitted = True
             result_endpoint = generation_url if async_mode else edit_url
             mark_idempotency_submission(
@@ -3914,23 +4019,50 @@ def main() -> int:
             )
         else:
             options["aspect_ratio"] = aspect_ratio
-            result = call_api(
-                generation_url,
-                key,
-                model,
-                prompt,
-                size,
-                args.n,
-                args.timeout,
-                options,
-                aspect_ratio=aspect_ratio,
-                image_urls=reference_urls or None,
-                stream=args.stream,
-                async_mode=async_mode,
-                webhook=args.webhook or "",
-                metadata=metadata,
-                idempotency_key=idempotency_fingerprint,
-            )
+            try:
+                result = call_api(
+                    generation_url,
+                    key,
+                    model,
+                    prompt,
+                    size,
+                    args.n,
+                    args.timeout,
+                    options,
+                    aspect_ratio=aspect_ratio,
+                    image_urls=reference_urls or None,
+                    stream=args.stream,
+                    async_mode=async_mode,
+                    webhook=args.webhook or "",
+                    metadata=metadata,
+                    idempotency_key=idempotency_fingerprint,
+                )
+            except ImageGenError as exc:
+                if not _can_fallback_to_legacy_model(model, exc):
+                    raise
+                result = call_api(
+                    generation_url,
+                    key,
+                    LEGACY_GPT_IMAGE_MODEL,
+                    prompt,
+                    size,
+                    args.n,
+                    args.timeout,
+                    options,
+                    aspect_ratio=aspect_ratio,
+                    image_urls=reference_urls or None,
+                    stream=args.stream,
+                    async_mode=async_mode,
+                    webhook=args.webhook or "",
+                    metadata=metadata,
+                    idempotency_key=_fallback_model_idempotency_key(
+                        idempotency_fingerprint, model
+                    ),
+                )
+                actual_model = LEGACY_GPT_IMAGE_MODEL
+                model_fallback = "legacy_group_no_2_5"
+                request_context["actual_model"] = actual_model
+                request_context["model_fallback"] = model_fallback
             request_submitted = True
             mark_idempotency_submission(
                 idempotency_record,
@@ -4040,7 +4172,9 @@ def main() -> int:
             "skill_name": SKILL_NAME,
             "version": SKILL_VERSION,
             "mode": mode,
-            "model": model,
+            "model": requested_model,
+            "actual_model": actual_model,
+            "model_fallback": model_fallback,
             "provider": provider,
             "count": len(files),
             "prompt_limit": prompt_limit,
@@ -4128,4 +4262,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

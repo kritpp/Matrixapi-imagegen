@@ -15,7 +15,7 @@ Current release: **v1.8.92**
 - Windows：双击 `install-windows.bat`，或运行 `install-windows.ps1`
 - macOS：双击 `install-macos.command`，或运行 `install-macos.sh`
 
-安装程序只要求输入 MatrixAI API Key，并默认使用 `gpt-image-2`。API URL
+安装程序只要求输入 MatrixAI API Key，并默认使用 `gpt-image-2.5-flare`。API URL
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
@@ -57,24 +57,27 @@ The release ZIP also keeps all four one-click installers:
 
 ## 手动配置 Configure
 
-只需配置 API Key。模型变量可省略，默认使用 `gpt-image-2`：
+只需配置 API Key。模型变量可省略，默认使用 `gpt-image-2.5-flare`：
 
 Windows PowerShell：
 
 ```powershell
 [Environment]::SetEnvironmentVariable("IMAGEGEN_API_KEY", "<your-api-key>", "User")
-[Environment]::SetEnvironmentVariable("IMAGEGEN_MODEL", "gpt-image-2", "User")
+[Environment]::SetEnvironmentVariable("IMAGEGEN_MODEL", "gpt-image-2.5-flare", "User")
 ```
 
 macOS/Linux：
 
 ```bash
 export IMAGEGEN_API_KEY="<your-api-key>"
-export IMAGEGEN_MODEL="gpt-image-2"
+export IMAGEGEN_MODEL="gpt-image-2.5-flare"
 ```
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
-`https://matrixapii.com`。需要 Pro 时，只把 `IMAGEGEN_MODEL` 改为
+`https://matrixapii.com`。支持 `gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、
+`gpt-image-2` 和 `gemini-3-pro-image`。提示词末尾写 `模型-2` 可选择 `gpt-image-2`；
+当 2.5 模型所在老分组明确返回模型/渠道不可用时，Skill 只自动回退一次到 `gpt-image-2`，
+普通 502/503 或可能已送达上游的错误不会重试。需要 Pro 时，把 `IMAGEGEN_MODEL` 改为
 `gemini-3-pro-image`。
 
 macOS 一键安装器会将 Key 和模型保存到权限为仅当前用户可读的
