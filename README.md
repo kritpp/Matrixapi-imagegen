@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.93**
+Current release: **v1.8.95**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.93](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.93/Matrixapi-imagegen-v1.8.93.zip)
+[下载 Matrixapi-imagegen v1.8.95](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.95/Matrixapi-imagegen-v1.8.95.zip)
 
 解压后按系统运行安装程序：
 
@@ -75,11 +75,13 @@ export IMAGEGEN_MODEL="gpt-image-2.5-flare"
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
 `https://matrixapii.com`。支持 `gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、
-`gpt-image-2` 和 `gemini-3-pro-image`。提示词末尾写 `模型-2` 可选择 `gpt-image-2`，写
+`gpt-image-2` 和 `gemini-3-pro-image-preview`。提示词末尾写 `模型-2` 可选择 `gpt-image-2`，写
 `模型-s2.5` 可选择 `gpt-image-2.5-sunburst`；
 当 2.5 模型所在老分组明确返回模型/渠道不可用时，Skill 只自动回退一次到 `gpt-image-2`，
-普通 502/503 或可能已送达上游的错误不会重试。需要 Pro 时，把 `IMAGEGEN_MODEL` 改为
-`gemini-3-pro-image`。
+普通 502/503 或可能已送达上游的错误不会重试。未显式指定模型时，Skill 会通过一次
+不产生费用的 `/v1/models` 查询识别当前 API Key 的可用分组：默认继续使用
+`gpt-image-2.5-flare`；仅有 Gemini 时直接请求并展示 `gemini-3-pro-image-preview`；
+只有旧 GPT 分组时使用并展示 `gpt-image-2`。此识别不会修改 `IMAGEGEN_MODEL`。
 
 macOS 一键安装器会将 Key 和模型保存到权限为仅当前用户可读的
 `~/.codex/Matrixapi-imagegen.env`；Skill 会自动读取该文件，但不会从中读取 URL。
