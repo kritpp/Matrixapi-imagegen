@@ -2,22 +2,26 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.95**
+Current release: **v1.8.96**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.95](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.95/Matrixapi-imagegen-v1.8.95.zip)
+[下载 Matrixapi-imagegen v1.8.96](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.96/Matrixapi-imagegen-v1.8.96.zip)
 
 解压后按系统运行安装程序：
 
 - Windows：双击 `install-windows.bat`，或运行 `install-windows.ps1`
 - macOS：双击 `install-macos.command`，或运行 `install-macos.sh`
 
-安装程序只要求输入 MatrixAI API Key，并默认使用 `gpt-image-2.5-flare`。API URL
+安装程序只要求输入 MatrixAI API Key，并默认使用 `gpt-image-2`。API URL
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
+
+v1.8.96 将默认模型改为 `gpt-image-2`。需要 Flare 时在提示词末尾写
+`模型-f2.5`，需要 Sunburst 时写 `模型-s2.5`；当前 Key 没有默认模型时仍会通过
+只读模型列表自动选择该分组实际开放的官方模型。
 
 本版本不做比例预检或自动改比例。客户明确指定的比例（包括 `16:9`）原样发送给上游；不会因比例判断而二次提交、裁剪或本地重绘。未指定比例时才使用模型默认值，普通生成和渠道配置不变。
 
@@ -57,31 +61,31 @@ The release ZIP also keeps all four one-click installers:
 
 ## 手动配置 Configure
 
-只需配置 API Key。模型变量可省略，默认使用 `gpt-image-2.5-flare`：
+只需配置 API Key。模型变量可省略，默认使用 `gpt-image-2`：
 
 Windows PowerShell：
 
 ```powershell
 [Environment]::SetEnvironmentVariable("IMAGEGEN_API_KEY", "<your-api-key>", "User")
-[Environment]::SetEnvironmentVariable("IMAGEGEN_MODEL", "gpt-image-2.5-flare", "User")
+[Environment]::SetEnvironmentVariable("IMAGEGEN_MODEL", "gpt-image-2", "User")
 ```
 
 macOS/Linux：
 
 ```bash
 export IMAGEGEN_API_KEY="<your-api-key>"
-export IMAGEGEN_MODEL="gpt-image-2.5-flare"
+export IMAGEGEN_MODEL="gpt-image-2"
 ```
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
 `https://matrixapii.com`。支持 `gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、
-`gpt-image-2` 和 `gemini-3-pro-image-preview`。提示词末尾写 `模型-2` 可选择 `gpt-image-2`，写
-`模型-s2.5` 可选择 `gpt-image-2.5-sunburst`；
+`gpt-image-2` 和 `gemini-3-pro-image-preview`。不写模型后缀时默认调用 `gpt-image-2`；
+提示词末尾写 `模型-f2.5` 可选择 `gpt-image-2.5-flare`，写 `模型-s2.5` 可选择
+`gpt-image-2.5-sunburst`；
 当 2.5 模型所在老分组明确返回模型/渠道不可用时，Skill 只自动回退一次到 `gpt-image-2`，
 普通 502/503 或可能已送达上游的错误不会重试。未显式指定模型时，Skill 会通过一次
-不产生费用的 `/v1/models` 查询识别当前 API Key 的可用分组：默认继续使用
-`gpt-image-2.5-flare`；仅有 Gemini 时直接请求并展示 `gemini-3-pro-image-preview`；
-只有旧 GPT 分组时使用并展示 `gpt-image-2`。此识别不会修改 `IMAGEGEN_MODEL`。
+不产生费用的 `/v1/models` 查询识别当前 API Key 的可用分组：优先使用
+`gpt-image-2`；仅有 2.5 或 Gemini 时直接请求并展示该分组实际开放的官方模型。
 
 macOS 一键安装器会将 Key 和模型保存到权限为仅当前用户可读的
 `~/.codex/Matrixapi-imagegen.env`；Skill 会自动读取该文件，但不会从中读取 URL。
@@ -105,8 +109,9 @@ Skill 会运行内置 `scripts/update_skill.py`，从本 GitHub 仓库选择版�
 版本号与固定 URL，再原子替换 Skill；新版本自检通过后才删除回滚备份。任何校验或
 自检失败都会恢复旧版本。
 
-自动更新不会删除历史图片，不会修改 API Key、模型变量或
-`~/.codex/Matrixapi-imagegen.env`，也不会调用生图接口。更新成功后必须重启 Codex。
+自动更新不会删除历史图片、不会修改 API Key，也不会调用生图接口。升级到 v1.8.96
+时，只会把旧安装器的默认模型 `gpt-image-2.5-flare` 迁移为 `gpt-image-2`；其他自定义
+模型值保持不变。更新成功后必须重启 Codex。
 
 The fixed API implements:
 

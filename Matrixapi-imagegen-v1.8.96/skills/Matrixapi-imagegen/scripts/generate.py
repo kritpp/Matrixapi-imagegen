@@ -33,11 +33,14 @@ except ImportError:  # pragma: no cover - allows importing this file as a module
     from .reference_pack import ReferencePackError, pack_yaliai_references
 
 
-DEFAULT_MODEL = "gpt-image-2.5-flare"
+DEFAULT_MODEL = "gpt-image-2"
+LEGACY_DEFAULT_MODEL = "gpt-image-2.5-flare"
+FLARE_IMAGE_MODEL = "gpt-image-2.5-flare"
+SUNBURST_IMAGE_MODEL = "gpt-image-2.5-sunburst"
 SUPPORTED_MODELS = (
     "gpt-image-2",
-    "gpt-image-2.5-flare",
-    "gpt-image-2.5-sunburst",
+    FLARE_IMAGE_MODEL,
+    SUNBURST_IMAGE_MODEL,
     "gemini-3-pro-image-preview",
 )
 GPT_IMAGE_MODELS = {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
@@ -45,7 +48,7 @@ LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.95"
+SKILL_VERSION = "1.8.96"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -447,6 +450,9 @@ MODEL_2_SUFFIX_RE = re.compile(r"\s*模型\s*[-－—]?\s*2\s*$", re.IGNORECASE)
 MODEL_SUNBURST_SUFFIX_RE = re.compile(
     r"\s*模型\s*[-－—]?\s*s2\.5\s*$", re.IGNORECASE
 )
+MODEL_FLARE_SUFFIX_RE = re.compile(
+    r"\s*模型\s*[-－—]?\s*f2\.5\s*$", re.IGNORECASE
+)
 
 
 def select_model_from_prompt(
@@ -455,11 +461,16 @@ def select_model_from_prompt(
     """Apply short customer-facing model suffixes without exposing aliases."""
     if explicit_model or not prompt:
         return model, prompt
+    if MODEL_FLARE_SUFFIX_RE.search(prompt):
+        cleaned = MODEL_FLARE_SUFFIX_RE.sub("", prompt).rstrip()
+        if not cleaned:
+            raise ImageGenError("模型-f2.5 标记后必须提供图片描述")
+        return FLARE_IMAGE_MODEL, cleaned
     if MODEL_SUNBURST_SUFFIX_RE.search(prompt):
         cleaned = MODEL_SUNBURST_SUFFIX_RE.sub("", prompt).rstrip()
         if not cleaned:
             raise ImageGenError("模型-s2.5 标记后必须提供图片描述")
-        return "gpt-image-2.5-sunburst", cleaned
+        return SUNBURST_IMAGE_MODEL, cleaned
     if not MODEL_2_SUFFIX_RE.search(prompt):
         return model, prompt
     cleaned = MODEL_2_SUFFIX_RE.sub("", prompt).rstrip()
@@ -487,6 +498,80 @@ def _user_environment_value(name: str) -> str:
         return value.strip() if isinstance(value, str) else ""
     except (FileNotFoundError, OSError):
         return ""
+
+
+def _rewrite_legacy_model_file(path: Path) -> bool:
+    """Atomically migrate the installer-managed model without touching the API key."""
+    if not path.is_file():
+        return False
+    try:
+        original = path.read_text(encoding="utf-8")
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise ImageGenError("Unable to read the installer-managed model setting") from exc
+
+    lines = original.splitlines(keepends=True)
+    migrated = False
+    for index, line in enumerate(lines):
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        if "=" not in content:
+            continue
+        name, value = content.split("=", 1)
+        if (
+            name.strip() == "IMAGEGEN_MODEL"
+            and value.strip().strip('"').strip("'") == LEGACY_DEFAULT_MODEL
+        ):
+            lines[index] = f"IMAGEGEN_MODEL={DEFAULT_MODEL}{ending}"
+            migrated = True
+    if not migrated:
+        return False
+
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text("".join(lines), encoding="utf-8")
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ImageGenError("Unable to migrate the installer-managed model setting") from exc
+    return True
+
+
+def migrate_legacy_default_model() -> bool:
+    """Move the v1.8.95 installer default to GPT Image 2 during update checks."""
+    migrated = False
+    if os.name == "nt":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                "Environment",
+                0,
+                winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE,
+            ) as key:
+                value, value_type = winreg.QueryValueEx(key, "IMAGEGEN_MODEL")
+                if isinstance(value, str) and value.strip() == LEGACY_DEFAULT_MODEL:
+                    winreg.SetValueEx(
+                        key, "IMAGEGEN_MODEL", 0, value_type, DEFAULT_MODEL
+                    )
+                    migrated = True
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise ImageGenError("Unable to migrate the user-level model setting") from exc
+    else:
+        migrated = _rewrite_legacy_model_file(
+            Path.home() / ".codex" / "Matrixapi-imagegen.env"
+        )
+
+    if migrated and os.environ.get("IMAGEGEN_MODEL", "").strip() == LEGACY_DEFAULT_MODEL:
+        os.environ["IMAGEGEN_MODEL"] = DEFAULT_MODEL
+    return migrated
 
 
 def _nested_strings(value: Any, key_name: str) -> list[str]:
@@ -718,8 +803,9 @@ def select_model_for_available_routes(
     for candidate in (
         configured_model,
         DEFAULT_MODEL,
+        FLARE_IMAGE_MODEL,
+        SUNBURST_IMAGE_MODEL,
         GEMINI_IMAGE_MODEL,
-        LEGACY_GPT_IMAGE_MODEL,
     ):
         if candidate in available_models:
             return candidate
@@ -3364,7 +3450,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        help="Official model id; defaults to IMAGEGEN_MODEL or gpt-image-2.5-flare",
+        help="Official model id; defaults to IMAGEGEN_MODEL or gpt-image-2",
     )
     parser.add_argument(
         "--provider",
@@ -3689,6 +3775,7 @@ def main() -> int:
             )
             return 0
 
+        model_migrated = migrate_legacy_default_model() if args.check_config else False
         base_url, key, model, source = discover_credentials()
         model_explicit = bool(args.model)
         model = (args.model or model).strip()
@@ -3703,6 +3790,7 @@ def main() -> int:
                         "version": SKILL_VERSION,
                         "credential_source": source,
                         "model": model,
+                        "model_migrated": model_migrated,
                         "supported_models": list(SUPPORTED_MODELS),
                         "prompt_limit": None,
                         "supported_modes": [

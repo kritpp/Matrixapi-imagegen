@@ -78,6 +78,66 @@ class AsyncResultRecoveryTests(unittest.TestCase):
         self.assertEqual(request.get_method(), "GET")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 7)
 
+    def test_default_and_prompt_suffixes_select_official_models(self) -> None:
+        self.assertEqual(generate.DEFAULT_MODEL, "gpt-image-2")
+        cases = (
+            ("生成一张花海 模型-f2.5", "gpt-image-2.5-flare"),
+            ("生成一张花海，模型-s2.5", "gpt-image-2.5-sunburst"),
+            ("生成一张花海 模型-2", "gpt-image-2"),
+        )
+        for prompt, expected_model in cases:
+            with self.subTest(prompt=prompt):
+                model, cleaned = generate.select_model_from_prompt(
+                    generate.DEFAULT_MODEL, prompt
+                )
+                self.assertEqual(model, expected_model)
+                self.assertNotIn("模型-", cleaned)
+
+    def test_legacy_installer_env_file_migrates_without_changing_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "Matrixapi-imagegen.env"
+            env_file.write_text(
+                "IMAGEGEN_API_KEY=secret\nIMAGEGEN_MODEL=gpt-image-2.5-flare\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(generate._rewrite_legacy_model_file(env_file))
+            self.assertEqual(
+                env_file.read_text(encoding="utf-8"),
+                "IMAGEGEN_API_KEY=secret\nIMAGEGEN_MODEL=gpt-image-2\n",
+            )
+            self.assertFalse(generate._rewrite_legacy_model_file(env_file))
+
+    def test_windows_legacy_user_model_migrates_during_config_check(self) -> None:
+        registry_key = mock.MagicMock()
+        registry_key.__enter__.return_value = "environment-key"
+        fake_winreg = types.SimpleNamespace(
+            HKEY_CURRENT_USER=object(),
+            KEY_QUERY_VALUE=1,
+            KEY_SET_VALUE=2,
+            OpenKey=mock.Mock(return_value=registry_key),
+            QueryValueEx=mock.Mock(
+                return_value=(generate.LEGACY_DEFAULT_MODEL, 1)
+            ),
+            SetValueEx=mock.Mock(),
+        )
+        with (
+            mock.patch.dict(sys.modules, {"winreg": fake_winreg}),
+            mock.patch.object(generate.os, "name", "nt"),
+            mock.patch.dict(
+                generate.os.environ,
+                {"IMAGEGEN_MODEL": generate.LEGACY_DEFAULT_MODEL},
+                clear=False,
+            ),
+        ):
+            self.assertTrue(generate.migrate_legacy_default_model())
+            self.assertEqual(
+                generate.os.environ["IMAGEGEN_MODEL"], generate.DEFAULT_MODEL
+            )
+
+        fake_winreg.SetValueEx.assert_called_once_with(
+            "environment-key", "IMAGEGEN_MODEL", 0, 1, generate.DEFAULT_MODEL
+        )
+
     def test_default_model_adapts_to_key_routes_without_changing_explicit_choices(self) -> None:
         self.assertEqual(
             generate.select_model_for_available_routes(
@@ -110,6 +170,22 @@ class AsyncResultRecoveryTests(unittest.TestCase):
                 explicit_selection=False,
             ),
             "gpt-image-2",
+        )
+        self.assertEqual(
+            generate.select_model_for_available_routes(
+                generate.DEFAULT_MODEL,
+                {"gpt-image-2.5-flare"},
+                explicit_selection=False,
+            ),
+            "gpt-image-2.5-flare",
+        )
+        self.assertEqual(
+            generate.select_model_for_available_routes(
+                generate.DEFAULT_MODEL,
+                {"gpt-image-2.5-sunburst"},
+                explicit_selection=False,
+            ),
+            "gpt-image-2.5-sunburst",
         )
         self.assertEqual(
             generate.select_model_for_available_routes(

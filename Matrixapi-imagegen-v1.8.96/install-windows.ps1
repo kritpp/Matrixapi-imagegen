@@ -34,7 +34,7 @@ if ([string]::IsNullOrWhiteSpace($apiKey)) {
     throw "An API key is required."
 }
 
-$model = "gpt-image-2.5-flare"
+$model = "gpt-image-2"
 [Environment]::SetEnvironmentVariable("IMAGEGEN_API_KEY", $apiKey, "User")
 [Environment]::SetEnvironmentVariable("IMAGEGEN_MODEL", $model, "User")
 $env:IMAGEGEN_API_KEY = $apiKey
@@ -49,7 +49,7 @@ Write-Host ""
 Write-Host "Matrixapi-imagegen was installed for Codex. Restart Codex before using it."
 Write-Host "Install location: $target"
 Write-Host "API URL is fixed inside the Skill: https://matrixapii.com"
-Write-Host "Installed version: 1.8.95"
+Write-Host "Installed version: 1.8.96"
 Write-Host "Current model: $model"
 Write-Host "Supported models: gpt-image-2.5-flare, gpt-image-2.5-sunburst, gpt-image-2, gemini-3-pro-image-preview"
 Read-Host "Press Enter to close"
