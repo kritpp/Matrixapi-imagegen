@@ -202,6 +202,78 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             generate.DEFAULT_MODEL,
         )
 
+    def test_default_cli_discovers_sunburst_before_the_only_image_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_dir = root / "images"
+            events: list[tuple[str, str]] = []
+
+            def discover_models(endpoint, _key, timeout=10):
+                events.append(("models", endpoint))
+                return {"gpt-image-2.5-sunburst"}
+
+            def submit_image(_endpoint, _key, model, *_args, **_kwargs):
+                events.append(("post", model))
+                return {
+                    "data": [
+                        {
+                            "b64_json": generate.base64.b64encode(
+                                png_bytes()
+                            ).decode("ascii")
+                        }
+                    ]
+                }
+
+            argv = [
+                "generate.py",
+                "--task-id",
+                "task-default-sunburst-1234",
+                "--prompt",
+                "生成一张花海",
+                "--out-dir",
+                str(output_dir),
+            ]
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(generate.sys, "argv", argv),
+                mock.patch.object(generate.Path, "home", return_value=root / "home"),
+                mock.patch.object(
+                    generate,
+                    "discover_credentials",
+                    return_value=(
+                        "https://matrixapii.com",
+                        "key",
+                        generate.DEFAULT_MODEL,
+                        "test",
+                    ),
+                ),
+                mock.patch.object(
+                    generate,
+                    "discover_available_models",
+                    side_effect=discover_models,
+                ),
+                mock.patch.object(
+                    generate, "call_api", side_effect=submit_image
+                ) as call_api,
+                mock.patch.object(
+                    generate, "_schedule_result_cleanup", return_value=True
+                ),
+                mock.patch.object(generate.sys, "stdout", stdout),
+                mock.patch.object(generate.sys, "stderr", io.StringIO()),
+            ):
+                self.assertEqual(generate.main(), 0)
+
+            self.assertEqual(
+                events,
+                [
+                    ("models", "https://matrixapii.com/v1/models"),
+                    ("post", "gpt-image-2.5-sunburst"),
+                ],
+            )
+            self.assertEqual(call_api.call_count, 1)
+            payload = generate.json.loads(stdout.getvalue().strip())
+            self.assertEqual(payload["actual_model"], "gpt-image-2.5-sunburst")
+
     def test_8k_size_is_preserved_without_local_downscale(self) -> None:
         self.assertEqual(generate.normalize_size("8K"), "8K")
         self.assertEqual(

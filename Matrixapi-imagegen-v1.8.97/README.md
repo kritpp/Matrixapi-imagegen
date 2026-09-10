@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.96**
+Current release: **v1.8.97**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.96](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.96/Matrixapi-imagegen-v1.8.96.zip)
+[下载 Matrixapi-imagegen v1.8.97](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.97/Matrixapi-imagegen-v1.8.97.zip)
 
 解压后按系统运行安装程序：
 
@@ -22,6 +22,9 @@ Current release: **v1.8.96**
 v1.8.96 将默认模型改为 `gpt-image-2`。需要 Flare 时在提示词末尾写
 `模型-f2.5`，需要 Sunburst 时写 `模型-s2.5`；当前 Key 没有默认模型时仍会通过
 只读模型列表自动选择该分组实际开放的官方模型。
+
+v1.8.97 修复默认命令显式传入 `gpt-image-2` 而跳过模型发现的问题。客户未指定
+模型时，Skill 会先完成一次免费模型查询，再提交唯一一次生图请求。
 
 本版本不做比例预检或自动改比例。客户明确指定的比例（包括 `16:9`）原样发送给上游；不会因比例判断而二次提交、裁剪或本地重绘。未指定比例时才使用模型默认值，普通生成和渠道配置不变。
 
