@@ -48,7 +48,7 @@ LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.97"
+SKILL_VERSION = "1.8.98"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -446,37 +446,68 @@ def mask_support_enabled(model: str) -> bool:
     return _environment_value(MASK_SUPPORT_ENV).lower() in {"1", "true", "yes"}
 
 
-MODEL_2_SUFFIX_RE = re.compile(r"\s*模型\s*[-－—]?\s*2\s*$", re.IGNORECASE)
-MODEL_SUNBURST_SUFFIX_RE = re.compile(
-    r"\s*模型\s*[-－—]?\s*s2\.5\s*$", re.IGNORECASE
+MODEL_MARKER_PATTERNS = (
+    (
+        LEGACY_GPT_IMAGE_MODEL,
+        re.compile(r"模型\s*[-－—]?\s*2(?![.\dA-Za-z])", re.IGNORECASE),
+    ),
+    (
+        SUNBURST_IMAGE_MODEL,
+        re.compile(r"模型\s*[-－—]?\s*s2\.5(?![.\dA-Za-z])", re.IGNORECASE),
+    ),
+    (
+        FLARE_IMAGE_MODEL,
+        re.compile(r"模型\s*[-－—]?\s*f2\.5(?![.\dA-Za-z])", re.IGNORECASE),
+    ),
 )
-MODEL_FLARE_SUFFIX_RE = re.compile(
-    r"\s*模型\s*[-－—]?\s*f2\.5\s*$", re.IGNORECASE
-)
+
+
+def prompt_model_marker(prompt: str) -> str | None:
+    """Return the single customer model marker present anywhere in a prompt."""
+    selected = {
+        model_id
+        for model_id, pattern in MODEL_MARKER_PATTERNS
+        if pattern.search(prompt or "")
+    }
+    if len(selected) > 1:
+        raise ImageGenError(
+            "同一请求包含多个不同的模型标记；本次请求未发送，也不会扣费。"
+        )
+    return next(iter(selected), None)
+
+
+def remove_prompt_model_markers(prompt: str) -> str:
+    """Remove customer-facing model controls without rewriting image content."""
+    cleaned = prompt
+    for _, pattern in MODEL_MARKER_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    return cleaned.strip()
 
 
 def select_model_from_prompt(
     model: str, prompt: str, *, explicit_model: bool = False
 ) -> tuple[str, str]:
     """Apply short customer-facing model suffixes without exposing aliases."""
-    if explicit_model or not prompt:
+    if not prompt:
         return model, prompt
-    if MODEL_FLARE_SUFFIX_RE.search(prompt):
-        cleaned = MODEL_FLARE_SUFFIX_RE.sub("", prompt).rstrip()
-        if not cleaned:
-            raise ImageGenError("模型-f2.5 标记后必须提供图片描述")
-        return FLARE_IMAGE_MODEL, cleaned
-    if MODEL_SUNBURST_SUFFIX_RE.search(prompt):
-        cleaned = MODEL_SUNBURST_SUFFIX_RE.sub("", prompt).rstrip()
-        if not cleaned:
-            raise ImageGenError("模型-s2.5 标记后必须提供图片描述")
-        return SUNBURST_IMAGE_MODEL, cleaned
-    if not MODEL_2_SUFFIX_RE.search(prompt):
+    marker_model = prompt_model_marker(prompt)
+    if marker_model is None:
         return model, prompt
-    cleaned = MODEL_2_SUFFIX_RE.sub("", prompt).rstrip()
+    cleaned = remove_prompt_model_markers(prompt)
     if not cleaned:
-        raise ImageGenError("模型-2 标记后必须提供图片描述")
-    return "gpt-image-2", cleaned
+        raise ImageGenError("模型标记之外必须提供图片描述")
+    if explicit_model and model != DEFAULT_MODEL:
+        return model, cleaned
+    return marker_model, cleaned
+
+
+def validate_initial_model_selection(marker_model: str | None, model: str) -> None:
+    """Fail before a paid request if a customer marker was not honored."""
+    if marker_model is not None and marker_model != model:
+        raise ImageGenError(
+            f"模型标记要求 {marker_model}，但首发模型为 {model}；"
+            "本次请求未发送，也不会扣费。"
+        )
 
 
 def selected_provider(value: str | None) -> str:
@@ -3831,6 +3862,12 @@ def main() -> int:
             raw_prompt = (args.prompt or "").strip()
         if not raw_prompt:
             raise ImageGenError("Prompt must not be empty")
+        marker_model = prompt_model_marker(raw_prompt)
+        marker_override = (
+            marker_model
+            if not model_explicit or model == DEFAULT_MODEL
+            else None
+        )
         selected_model, selected_prompt = select_model_from_prompt(
             model, raw_prompt, explicit_model=model_explicit
         )
@@ -3845,6 +3882,7 @@ def main() -> int:
             available_models,
             explicit_selection=model_explicit or model_selected_by_prompt,
         )
+        validate_initial_model_selection(marker_override, model)
         raw_prompt = selected_prompt
         requested_model = model
         actual_model = model

@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.97**
+Current release: **v1.8.98**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.97](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.97/Matrixapi-imagegen-v1.8.97.zip)
+[下载 Matrixapi-imagegen v1.8.98](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.98/Matrixapi-imagegen-v1.8.98.zip)
 
 解压后按系统运行安装程序：
 
@@ -19,12 +19,16 @@ Current release: **v1.8.97**
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
-v1.8.96 将默认模型改为 `gpt-image-2`。需要 Flare 时在提示词末尾写
+v1.8.96 将默认模型改为 `gpt-image-2`。需要 Flare 时在提示词任意位置写
 `模型-f2.5`，需要 Sunburst 时写 `模型-s2.5`；当前 Key 没有默认模型时仍会通过
 只读模型列表自动选择该分组实际开放的官方模型。
 
 v1.8.97 修复默认命令显式传入 `gpt-image-2` 而跳过模型发现的问题。客户未指定
 模型时，Skill 会先完成一次免费模型查询，再提交唯一一次生图请求。
+
+v1.8.98 让 `模型-f2.5` 与 `模型-s2.5` 可出现在当前提示词的任意位置，并让本轮
+明确标记覆盖误带的默认模型。不同模型标记冲突或发送前模型不一致时会在本地停止，
+不会提交付费请求；默认模型、渠道提前识别与老分组受控回退保持不变。
 
 本版本不做比例预检或自动改比例。客户明确指定的比例（包括 `16:9`）原样发送给上游；不会因比例判断而二次提交、裁剪或本地重绘。未指定比例时才使用模型默认值，普通生成和渠道配置不变。
 
@@ -82,8 +86,8 @@ export IMAGEGEN_MODEL="gpt-image-2"
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
 `https://matrixapii.com`。支持 `gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、
-`gpt-image-2` 和 `gemini-3-pro-image-preview`。不写模型后缀时默认调用 `gpt-image-2`；
-提示词末尾写 `模型-f2.5` 可选择 `gpt-image-2.5-flare`，写 `模型-s2.5` 可选择
+`gpt-image-2` 和 `gemini-3-pro-image-preview`。不写模型标记时默认调用 `gpt-image-2`；
+提示词任意位置写 `模型-f2.5` 可选择 `gpt-image-2.5-flare`，写 `模型-s2.5` 可选择
 `gpt-image-2.5-sunburst`；
 当 2.5 模型所在老分组明确返回模型/渠道不可用时，Skill 只自动回退一次到 `gpt-image-2`，
 普通 502/503 或可能已送达上游的错误不会重试。未显式指定模型时，Skill 会通过一次

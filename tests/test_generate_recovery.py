@@ -93,6 +93,65 @@ class AsyncResultRecoveryTests(unittest.TestCase):
                 self.assertEqual(model, expected_model)
                 self.assertNotIn("模型-", cleaned)
 
+    def test_model_markers_work_anywhere_and_override_default_argument(self) -> None:
+        cases = (
+            ("模型-s2.5 生成一张花海", "gpt-image-2.5-sunburst"),
+            ("生成一张模型-f2.5花海", "gpt-image-2.5-flare"),
+            ("生成一张花海 模型-s2.5。保持电影感", "gpt-image-2.5-sunburst"),
+            ("生成一张花海。\n模型-f2.5\n保持电影感", "gpt-image-2.5-flare"),
+        )
+        for prompt, expected_model in cases:
+            with self.subTest(prompt=prompt):
+                model, cleaned = generate.select_model_from_prompt(
+                    generate.DEFAULT_MODEL, prompt, explicit_model=True
+                )
+                self.assertEqual(model, expected_model)
+                self.assertNotIn("模型-", cleaned)
+
+        full_model, cleaned = generate.select_model_from_prompt(
+            "gpt-image-2.5-flare",
+            "生成花海 模型-s2.5",
+            explicit_model=True,
+        )
+        self.assertEqual(full_model, "gpt-image-2.5-flare")
+        self.assertNotIn("模型-", cleaned)
+
+    def test_repeated_same_marker_is_allowed_but_conflicting_markers_fail(self) -> None:
+        model, cleaned = generate.select_model_from_prompt(
+            generate.DEFAULT_MODEL, "模型-s2.5 生成花海 模型-s2.5"
+        )
+        self.assertEqual(model, "gpt-image-2.5-sunburst")
+        self.assertEqual(cleaned, "生成花海")
+
+        with self.assertRaisesRegex(generate.ImageGenError, "多个不同"):
+            generate.select_model_from_prompt(
+                generate.DEFAULT_MODEL, "生成花海 模型-s2.5 模型-f2.5"
+            )
+
+    def test_initial_model_validation_fails_closed_before_submit(self) -> None:
+        generate.validate_initial_model_selection(
+            "gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst"
+        )
+        with self.assertRaisesRegex(generate.ImageGenError, "本次请求未发送"):
+            generate.validate_initial_model_selection(
+                "gpt-image-2.5-sunburst", "gpt-image-2"
+            )
+
+    def test_each_turn_selects_its_own_model_without_previous_turn_state(self) -> None:
+        prompts = (
+            "首次生成 模型-s2.5",
+            "修改上一张图片",
+            "再次生成 模型-s2.5",
+        )
+        selected = [
+            generate.select_model_from_prompt(generate.DEFAULT_MODEL, prompt)[0]
+            for prompt in prompts
+        ]
+        self.assertEqual(
+            selected,
+            ["gpt-image-2.5-sunburst", "gpt-image-2", "gpt-image-2.5-sunburst"],
+        )
+
     def test_legacy_installer_env_file_migrates_without_changing_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env_file = Path(directory) / "Matrixapi-imagegen.env"
@@ -272,6 +331,70 @@ class AsyncResultRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(call_api.call_count, 1)
             payload = generate.json.loads(stdout.getvalue().strip())
+            self.assertEqual(payload["actual_model"], "gpt-image-2.5-sunburst")
+
+    def test_prompt_marker_overrides_accidental_default_model_before_submit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_dir = root / "images"
+            submitted_models: list[str] = []
+
+            def submit_image(_endpoint, _key, model, *_args, **_kwargs):
+                submitted_models.append(model)
+                return {
+                    "data": [
+                        {
+                            "b64_json": generate.base64.b64encode(
+                                png_bytes()
+                            ).decode("ascii")
+                        }
+                    ]
+                }
+
+            argv = [
+                "generate.py",
+                "--task-id",
+                "task-marker-sunburst-1234",
+                "--prompt",
+                "生成一张花海，模型-s2.5。保持电影感",
+                "--model",
+                "gpt-image-2",
+                "--out-dir",
+                str(output_dir),
+            ]
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(generate.sys, "argv", argv),
+                mock.patch.object(generate.Path, "home", return_value=root / "home"),
+                mock.patch.object(
+                    generate,
+                    "discover_credentials",
+                    return_value=(
+                        "https://matrixapii.com",
+                        "key",
+                        generate.DEFAULT_MODEL,
+                        "test",
+                    ),
+                ),
+                mock.patch.object(
+                    generate, "discover_available_models"
+                ) as discover_models,
+                mock.patch.object(
+                    generate, "call_api", side_effect=submit_image
+                ) as call_api,
+                mock.patch.object(
+                    generate, "_schedule_result_cleanup", return_value=True
+                ),
+                mock.patch.object(generate.sys, "stdout", stdout),
+                mock.patch.object(generate.sys, "stderr", io.StringIO()),
+            ):
+                self.assertEqual(generate.main(), 0)
+
+            discover_models.assert_not_called()
+            self.assertEqual(call_api.call_count, 1)
+            self.assertEqual(submitted_models, ["gpt-image-2.5-sunburst"])
+            payload = generate.json.loads(stdout.getvalue().strip())
+            self.assertEqual(payload["model"], "gpt-image-2.5-sunburst")
             self.assertEqual(payload["actual_model"], "gpt-image-2.5-sunburst")
 
     def test_8k_size_is_preserved_without_local_downscale(self) -> None:
