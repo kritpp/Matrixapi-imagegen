@@ -43,6 +43,59 @@ def task_png_path(
 
 
 class AsyncResultRecoveryTests(unittest.TestCase):
+    def test_max_quality_is_available_without_changing_auto_default(self) -> None:
+        self.assertEqual(generate.validate_quality("MAX"), "max")
+        self.assertEqual(generate.validate_quality("auto"), "auto")
+        self.assertEqual(generate._option_fields("max", None, None)["quality"], "max")
+        self.assertNotIn("gpt-image-2", generate.GPT_IMAGE_2_5_MODELS)
+
+    def test_route_fallback_changes_2_point_5_quality_to_high(self) -> None:
+        for selected_quality in ("auto", "max"):
+            with self.subTest(quality=selected_quality), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                calls: list[tuple[str, str]] = []
+
+                def submit_image(_endpoint, _key, model, _prompt, _size, _count, _timeout, options, **_kwargs):
+                    calls.append((model, options["quality"]))
+                    if model != "gpt-image-2":
+                        raise generate.ImageGenError(
+                            "model_not_found before dispatch",
+                            status_code=404,
+                            safe_model_route_failure=True,
+                        )
+                    return {
+                        "data": [
+                            {"b64_json": generate.base64.b64encode(png_bytes()).decode("ascii")}
+                        ]
+                    }
+
+                argv = [
+                    "generate.py", "--task-id", "task-fallback-quality-1234",
+                    "--model", "gpt-image-2.5-flare", "--quality", selected_quality,
+                    "--prompt", "a flower", "--out-dir", str(root / "images"),
+                ]
+                stdout = io.StringIO()
+                with (
+                    mock.patch.object(generate.sys, "argv", argv),
+                    mock.patch.object(generate.Path, "home", return_value=root / "home"),
+                    mock.patch.object(generate, "discover_credentials", return_value=(
+                        "https://matrixapii.com", "key", "gpt-image-2", "test"
+                    )),
+                    mock.patch.object(generate, "call_api", side_effect=submit_image),
+                    mock.patch.object(generate, "_schedule_result_cleanup", return_value=True),
+                    mock.patch.object(generate.sys, "stdout", stdout),
+                    mock.patch.object(generate.sys, "stderr", io.StringIO()),
+                ):
+                    self.assertEqual(generate.main(), 0)
+
+                self.assertEqual(calls, [
+                    ("gpt-image-2.5-flare", selected_quality),
+                    ("gpt-image-2", "high"),
+                ])
+                result = generate.json.loads(stdout.getvalue().strip())
+                self.assertEqual(result["actual_model"], "gpt-image-2")
+                self.assertEqual(result["quality"], "high")
+
     def setUp(self) -> None:
         self.result_hide = mock.patch.object(
             generate, "_schedule_result_hide", return_value=False

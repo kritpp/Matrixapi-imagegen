@@ -48,7 +48,7 @@ LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.98"
+SKILL_VERSION = "1.8.99"
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -87,7 +87,7 @@ IDEMPOTENCY_WAIT_INTERVAL_SECONDS = 0.2
 # The pinned GPT Image 2 routes accept native 4K edits. Older relays can still
 # opt into the legacy downscale through IMAGEGEN_LEGACY_EDIT_RESIZE.
 EDIT_MAX_EDGE = 1792
-QUALITY_VALUES = {"auto", "low", "medium", "high"}
+QUALITY_VALUES = {"auto", "low", "medium", "high", "max"}
 # ``auto`` lets the model choose.  Explicit ratios are passed through to the
 # configured relay instead of being limited to the old 1:1/3:2/2:3 enum.
 ASPECT_RATIOS = {"auto", "1:1", "3:2", "2:3"}
@@ -3896,6 +3896,8 @@ def main() -> int:
         prompt_limit = None
 
         quality = validate_quality(args.quality)
+        if quality == "max" and model not in GPT_IMAGE_2_5_MODELS:
+            raise ImageGenError("max quality is only supported for GPT Image 2.5 models")
         aspect_ratio = validate_aspect_ratio(args.aspect_ratio)
         aspect_ratio_source = "user" if aspect_ratio != "auto" else "model_default"
         if args.output_size:
@@ -4223,13 +4225,15 @@ def main() -> int:
                     request_image_paths,
                     args.mask,
                     args.timeout,
-                    options,
+                    {**options, "quality": "high"},
                     _fallback_model_idempotency_key(idempotency_fingerprint, model),
                 )
                 actual_model = LEGACY_GPT_IMAGE_MODEL
                 model_fallback = "legacy_group_no_2_5"
+                quality = "high"
                 request_context["actual_model"] = actual_model
                 request_context["model_fallback"] = model_fallback
+                request_context["quality"] = quality
             request_submitted = True
             result_endpoint = generation_url if async_mode else edit_url
             mark_idempotency_submission(
@@ -4275,7 +4279,7 @@ def main() -> int:
                     size,
                     args.n,
                     args.timeout,
-                    options,
+                    {**options, "quality": "high"},
                     aspect_ratio=aspect_ratio,
                     image_urls=reference_urls or None,
                     stream=args.stream,
@@ -4288,8 +4292,10 @@ def main() -> int:
                 )
                 actual_model = LEGACY_GPT_IMAGE_MODEL
                 model_fallback = "legacy_group_no_2_5"
+                quality = "high"
                 request_context["actual_model"] = actual_model
                 request_context["model_fallback"] = model_fallback
+                request_context["quality"] = quality
             request_submitted = True
             mark_idempotency_submission(
                 idempotency_record,

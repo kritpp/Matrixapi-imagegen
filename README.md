@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.98**
+Current release: **v1.8.99**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.98](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.98/Matrixapi-imagegen-v1.8.98.zip)
+[下载 Matrixapi-imagegen v1.8.99](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.99/Matrixapi-imagegen-v1.8.99.zip)
 
 解压后按系统运行安装程序：
 
@@ -29,6 +29,11 @@ v1.8.97 修复默认命令显式传入 `gpt-image-2` 而跳过模型发现的问
 v1.8.98 让 `模型-f2.5` 与 `模型-s2.5` 可出现在当前提示词的任意位置，并让本轮
 明确标记覆盖误带的默认模型。不同模型标记冲突或发送前模型不一致时会在本地停止，
 不会提交付费请求；默认模型、渠道提前识别与老分组受控回退保持不变。
+
+v1.8.99 支持 2.5 模型显式选择 `max` 画质。默认 `auto` 不变，指定网站
+渠道的 GPT Image 2 默认转发 `high`，2.5 映射自动转发 `max`。2.5 路由若在发送前
+明确不可用，受控回退到 GPT Image 2 时使用 `high`；其他渠道保持原行为。
+教程下载链接指向本版本安装包。
 
 本版本不做比例预检或自动改比例。客户明确指定的比例（包括 `16:9`）原样发送给上游；不会因比例判断而二次提交、裁剪或本地重绘。未指定比例时才使用模型默认值，普通生成和渠道配置不变。
 
@@ -156,7 +161,7 @@ again automatically.
 python skills/Matrixapi-imagegen/scripts/generate.py --task-id task-story-0001 \
   --story-pages 3 --prompt "<complete story request>" \
   --image /path/to/reference-1.png --image /path/to/reference-2.png \
-  --size 4K --quality high
+  --size 4K
 ```
 
 When editing or generating with an explicit `--aspect-ratio` such as `16:9`, the
