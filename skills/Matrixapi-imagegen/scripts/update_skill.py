@@ -44,12 +44,7 @@ REQUIRED_FILES = (
 )
 FIXED_BASE_URL = "https://matrixapii.com"
 FIXED_BASE_HOST = "matrixapii.com"
-SUPPORTED_MODELS = (
-    "gpt-image-2",
-    "gpt-image-2.5-flare",
-    "gpt-image-2.5-sunburst",
-    "gemini-3-pro-image-preview",
-)
+SUPPORTED_MODELS = ('gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.6-sunburst', 'gemini-3-pro-image-preview', 'midjourney-v8.2', 'midjourney-v8.2-fast', 'midjourney-v8.2-turbo')
 
 
 class UpdateError(RuntimeError):
@@ -387,6 +382,7 @@ def main() -> int:
                     "current_model": current_model,
                     "selected_model": current_model,
                     "supported_models": supported_models,
+                    "model_shortcuts": installed.get("model_shortcuts", {}),
                     "display_message": (
                         (
                             f"Matrixapi-imagegen {installed_version} 已是当前版本，未覆盖本地技能；"
@@ -396,6 +392,7 @@ def main() -> int:
                         +
                         f"当前模型：{current_model}；"
                         f"支持模型：{', '.join(str(item) for item in supported_models)}；"
+                        + "简称可放在提示词任意位置：-f2.5 / -s2.5 / -f2.6 / -s2.6 / -m8 / -m8f / -m8t；MJ 分组默认普通版，Fast/Turbo 需明确简称；MJ 每次四张，比例可写16：9，不保证原生4K；"
                         + restart_message
                     ),
                     "restart_required": not update_skipped,

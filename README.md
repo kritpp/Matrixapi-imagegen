@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.8.99**
+Current release: **v1.9.0**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.8.99](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.8.99/Matrixapi-imagegen-v1.8.99.zip)
+[下载 Matrixapi-imagegen v1.9.0](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.9.0/Matrixapi-imagegen-v1.9.0.zip)
 
 解压后按系统运行安装程序：
 
@@ -19,30 +19,46 @@ Current release: **v1.8.99**
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
-v1.8.96 将默认模型改为 `gpt-image-2`。需要 Flare 时在提示词任意位置写
-`模型-f2.5`，需要 Sunburst 时写 `模型-s2.5`；当前 Key 没有默认模型时仍会通过
-只读模型列表自动选择该分组实际开放的官方模型。
+v1.9.0 新增 GPT Image 2.6 与 Midjourney 三种模式，统一支持提示词任意位置的模型简称。安装与更新结果会列出完整支持模型和简称。
 
-v1.8.97 修复默认命令显式传入 `gpt-image-2` 而跳过模型发现的问题。客户未指定
-模型时，Skill 会先完成一次免费模型查询，再提交唯一一次生图请求。
+| 简称（提示词任意位置） | 完整请求模型 | 用途 |
+| --- | --- | --- |
+| 不指定 | `gpt-image-2`（按 Key 可用模型发现） | 默认图片生成与编辑 |
+| `-f2.5` | `gpt-image-2.5-flare` | 2.5 Flare |
+| `-s2.5` | `gpt-image-2.5-sunburst` | 2.5 Sunburst |
+| `-f2.6` | `gpt-image-2.6-flare` | 2.6 快速迭代与交互式创作 |
+| `-s2.6` | `gpt-image-2.6-sunburst` | 2.6 细致视觉创作与构图 |
+| 完整模型名 | `gemini-3-pro-image-preview` | 现有 Gemini 图片通道 |
+| `-m8` | `midjourney-v8.2` | MJ 普通模式 |
+| `-m8f` | `midjourney-v8.2-fast` | MJ Fast 模式 |
+| `-m8t` | `midjourney-v8.2-turbo` | MJ Turbo 模式 |
 
-v1.8.98 让 `模型-f2.5` 与 `模型-s2.5` 可出现在当前提示词的任意位置，并让本轮
-明确标记覆盖误带的默认模型。不同模型标记冲突或发送前模型不一致时会在本地停止，
-不会提交付费请求；默认模型、渠道提前识别与老分组受控回退保持不变。
+`-f2.6 生成花海`、`生成 -f2.6 花海`、`生成花海 -f2.6` 均选择相同模型。
+兼容 `模型-f2.5`、`技能-m8f` 等写法；相近型号不会混淆，不同模型简称冲突时本地停止。
+未指定时按当前 API Key 的可用模型选择：普通图片分组默认 `gpt-image-2`，只有 Gemini 的分组自动用 Gemini，MJ 分组默认 `midjourney-v8.2`；显式指定时使用对应完整请求模型。
 
-v1.8.99 支持 2.5 模型显式选择 `max` 画质。默认 `auto` 不变，指定网站
-渠道的 GPT Image 2 默认转发 `high`，2.5 映射自动转发 `max`。2.5 路由若在发送前
-明确不可用，受控回退到 GPT Image 2 时使用 `high`；其他渠道保持原行为。
-教程下载链接指向本版本安装包。
+### MJ 比例、尺寸和返回图片
+
+例如：`生成一张蓝色陶杯，-m8f，比例16：9`。客户也可写 `16:9` 或 `--ar 16:9`，放在提示词任意位置；技能会转成上游需要的末尾 `--ar` 参数。这不限制模型简称的位置。
+
+MJ 每次固定返回 **4 张图片**，四张合计一次调用费用，不再按返回张数乘 4；金额以模型广场当前分组价格为准。一次请求交付四张，不需要重复调用。当前通道仅支持文字生图，不支持参考图或编辑。
+
+MJ 没有独立的 1K/2K/4K/8K 尺寸参数；不要给 MJ 传 `--size`。`4K` 描述词和 `--hd` 均不保证精确 4K 像素，交付以返回图片实际尺寸为准。若明确需要本地放大至 3840×2160，可使用 `--output-size 3840x2160`，必须说明是本地处理并保留原图。MJ 不使用通用 `--quality`、`--async`、`--stream`；风格和质量使用提示词中的 `--s`、`--q`、`--hd` 等支持参数。
+
+MJ 分组未指定简称时默认 `midjourney-v8.2`；只有明确指定 `-m8f`/`-m8t` 或完整模型名才用 Fast/Turbo，普通版不可用时不自动换到更快模式。
+
+实测：普通版和 Fast 的 `16:9` 返回四张 `1456×816`；Turbo 的 `9:16 --hd` 返回四张 `1648×2944`，均已通过实际 Codex 技能调用并展示图片。写 `4K` 细节描述并未使普通版变成原生 4K。尺寸是本次结果，不保证每次固定相同。
+
+当前支持情况取决于 API Key 所在分组。2.5 的显式 `max` 和原有 Gemini 流程继续保留。
 
 本版本不做比例预检或自动改比例。客户明确指定的比例（包括 `16:9`）原样发送给上游；不会因比例判断而二次提交、裁剪或本地重绘。未指定比例时才使用模型默认值，普通生成和渠道配置不变。
 
-本版本新增显式 `8K` 输出档位。只有客户明确要求 `8K` 时才发送该档位；
+GPT Image 图片通道支持显式 `8K` 输出档位（MJ 不适用）。只有客户明确要求 `8K` 时才发送该档位；
 `1K`、`2K`、`4K` 的默认行为、比例和画质参数保持不变。
 
 8K 等大结果采用流式保存：状态查询只接收小型任务 JSON，完成后的图片分块写入临时文件并校验后原子保存。不会因图片大于旧的内存读取上限而重新提交、重复扣费或降低请求尺寸。
 
-成功返回会在图片链接下显示最终图片的真实像素尺寸、比例和画质；这只是本地回显，不增加任何上游请求或等待时间。
+成功返回会在图片链接下显示最终图片的真实像素尺寸和比例；这只是本地回显，不增加任何上游请求或等待时间。
 
 v1.8.92 明确区分 600 秒本地等待上限与上游终态：本地等待结束不会被当作失败或退款依据，并保留同一 task-id 供后续只读状态恢复；不会重新提交付费请求。只有中转站确认同一上游任务最终失败、取消、过期或明确不存在时才允许退款，排队、处理中、网络错误与 5xx 均保持结果未知且不退款。
 
@@ -90,14 +106,13 @@ export IMAGEGEN_MODEL="gpt-image-2"
 ```
 
 `IMAGEGEN_BASE_URL` 不需要配置。即使客户电脑残留旧值，也不能覆盖 Skill 内固定的
-`https://matrixapii.com`。支持 `gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、
-`gpt-image-2` 和 `gemini-3-pro-image-preview`。不写模型标记时默认调用 `gpt-image-2`；
+`https://matrixapii.com`。支持模型与简称见上表。不写模型标记时按当前 Key 的可用分组选择默认模型；
 提示词任意位置写 `模型-f2.5` 可选择 `gpt-image-2.5-flare`，写 `模型-s2.5` 可选择
 `gpt-image-2.5-sunburst`；
 当 2.5 模型所在老分组明确返回模型/渠道不可用时，Skill 只自动回退一次到 `gpt-image-2`，
 普通 502/503 或可能已送达上游的错误不会重试。未显式指定模型时，Skill 会通过一次
 不产生费用的 `/v1/models` 查询识别当前 API Key 的可用分组：优先使用
-`gpt-image-2`；仅有 2.5 或 Gemini 时直接请求并展示该分组实际开放的官方模型。
+`gpt-image-2`；仅有 2.5、2.6、Gemini 或 MJ 时直接请求并展示该分组实际开放的官方模型。
 
 macOS 一键安装器会将 Key 和模型保存到权限为仅当前用户可读的
 `~/.codex/Matrixapi-imagegen.env`；Skill 会自动读取该文件，但不会从中读取 URL。
@@ -130,7 +145,7 @@ The fixed API implements:
 - `POST /v1/images/generations`
 - `POST /v1/images/edits` with multipart `image` and optional `mask`
 
-The Skill accepts up to 16 references. Native GPT Image 2 4K edits are kept at
+Non-MJ image routes accept up to 16 references; MJ does not support references. Native GPT Image 2 4K edits are kept at
 full resolution. Large local edits (6 or more references, or at least 48 MiB
 of source files) use the relay's asynchronous task endpoint automatically and
 poll for the result, so a long synchronous connection cannot be lost after the
@@ -144,7 +159,7 @@ remain on the original reference path and are never packed.
 
 ## Fast sequential comics
 
-For a connected multi-page comic, `--story-pages` starts generation immediately
+For a connected multi-page comic on a non-MJ image-editing route, `--story-pages` starts generation immediately
 without requiring Codex to pre-write every page prompt. Page 1 uses the complete
 original reference set. Each successful page returns an exact `next_arguments`
 array; continuing with those arguments makes page 2 use only page 1, page 3 use

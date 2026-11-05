@@ -8,6 +8,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -37,18 +38,29 @@ DEFAULT_MODEL = "gpt-image-2"
 LEGACY_DEFAULT_MODEL = "gpt-image-2.5-flare"
 FLARE_IMAGE_MODEL = "gpt-image-2.5-flare"
 SUNBURST_IMAGE_MODEL = "gpt-image-2.5-sunburst"
+FLARE_26_IMAGE_MODEL = "gpt-image-2.6-flare"
+SUNBURST_26_IMAGE_MODEL = "gpt-image-2.6-sunburst"
+MIDJOURNEY_MODELS = ("midjourney-v8.2", "midjourney-v8.2-fast", "midjourney-v8.2-turbo")
 SUPPORTED_MODELS = (
     "gpt-image-2",
     FLARE_IMAGE_MODEL,
     SUNBURST_IMAGE_MODEL,
+    FLARE_26_IMAGE_MODEL,
+    SUNBURST_26_IMAGE_MODEL,
     "gemini-3-pro-image-preview",
+    *MIDJOURNEY_MODELS,
 )
-GPT_IMAGE_MODELS = {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
+GPT_IMAGE_MODELS = {"gpt-image-2", FLARE_IMAGE_MODEL, SUNBURST_IMAGE_MODEL, FLARE_26_IMAGE_MODEL, SUNBURST_26_IMAGE_MODEL}
 LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.8.99"
+SKILL_VERSION = "1.9.0"
+MODEL_SHORTCUTS = {
+    "f2.5": FLARE_IMAGE_MODEL, "s2.5": SUNBURST_IMAGE_MODEL,
+    "f2.6": FLARE_26_IMAGE_MODEL, "s2.6": SUNBURST_26_IMAGE_MODEL,
+    "m8": MIDJOURNEY_MODELS[0], "m8f": MIDJOURNEY_MODELS[1], "m8t": MIDJOURNEY_MODELS[2],
+}
 DEFAULT_BASE_URL = "https://matrixapii.com"
 ALLOWED_BASE_HOST = "matrixapii.com"
 RESULT_HIDE_DELAY_MS = 10_000
@@ -447,17 +459,13 @@ def mask_support_enabled(model: str) -> bool:
 
 
 MODEL_MARKER_PATTERNS = (
-    (
-        LEGACY_GPT_IMAGE_MODEL,
-        re.compile(r"模型\s*[-－—]?\s*2(?![.\dA-Za-z])", re.IGNORECASE),
-    ),
-    (
-        SUNBURST_IMAGE_MODEL,
-        re.compile(r"模型\s*[-－—]?\s*s2\.5(?![.\dA-Za-z])", re.IGNORECASE),
-    ),
-    (
-        FLARE_IMAGE_MODEL,
-        re.compile(r"模型\s*[-－—]?\s*f2\.5(?![.\dA-Za-z])", re.IGNORECASE),
+    (LEGACY_GPT_IMAGE_MODEL, re.compile(r"模型\s*[-－—]?\s*2(?![.\dA-Za-z_])", re.IGNORECASE)),
+    *tuple(
+        (model_id, re.compile(
+            r"(?:(?:模型|技能)\s*[-－—]?\s*|(?<![A-Za-z0-9_./:\\-])[-－—]\s*)"
+            + re.escape(alias) + r"(?![.\dA-Za-z_])", re.IGNORECASE,
+        ))
+        for alias, model_id in MODEL_SHORTCUTS.items()
     ),
 )
 
@@ -829,14 +837,27 @@ def select_model_for_available_routes(
     explicit_selection: bool,
 ) -> str:
     """Keep an available configured model, otherwise adapt to the key's route."""
-    if explicit_selection or available_models is None:
+    if explicit_selection:
         return configured_model
+    # Fast/Turbo are current-request opt-ins, never inherited defaults.
+    if configured_model in MIDJOURNEY_MODELS[1:]:
+        configured_model = MIDJOURNEY_MODELS[0]
+    if available_models is None:
+        return configured_model
+    non_mj_supported = set(SUPPORTED_MODELS) - set(MIDJOURNEY_MODELS)
+    if available_models.intersection(MIDJOURNEY_MODELS) and not available_models.intersection(non_mj_supported):
+        if MIDJOURNEY_MODELS[0] in available_models:
+            return MIDJOURNEY_MODELS[0]
+        raise ImageGenError("当前 MJ 分组未开放默认的 midjourney-v8.2；Fast/Turbo 需要明确写 -m8f/-m8t。本次未提交生图。")
     for candidate in (
         configured_model,
         DEFAULT_MODEL,
         FLARE_IMAGE_MODEL,
         SUNBURST_IMAGE_MODEL,
+        FLARE_26_IMAGE_MODEL,
+        SUNBURST_26_IMAGE_MODEL,
         GEMINI_IMAGE_MODEL,
+        MIDJOURNEY_MODELS[0],
     ):
         if candidate in available_models:
             return candidate
@@ -908,12 +929,53 @@ def validate_quality(quality: str) -> str:
 
 
 def validate_aspect_ratio(aspect_ratio: str) -> str:
-    normalized = aspect_ratio.strip().lower()
+    normalized = re.sub(r"\s+", "", aspect_ratio.strip().lower().replace("：", ":"))
     if normalized in ASPECT_RATIOS:
         return normalized
     if not re.fullmatch(r"[1-9]\d*:[1-9]\d*", normalized):
         raise ImageGenError("Aspect ratio must use positive integers separated by ':'")
     return normalized
+
+
+def prepare_midjourney_prompt(prompt: str, aspect_ratio: str = "auto") -> tuple[str, str]:
+    """Translate a user ratio into MJ's prompt flag; reject conflicting controls."""
+    ratio_flag = re.compile(r"(?<!\S)--(?:ar|aspect)\s+([1-9]\d*\s*[:：]\s*[1-9]\d*)(?!\d)", re.IGNORECASE)
+    labelled = re.compile(r"(?:比例|aspect\s+ratio)\s*[:：]?\s*([1-9]\d*\s*[:：]\s*[1-9]\d*)(?!\d)", re.IGNORECASE)
+    bare = re.compile(r"(?<![\dA-Za-z:：])((?:1\s*[:：]\s*1|16\s*[:：]\s*9|9\s*[:：]\s*16|4\s*[:：]\s*3|3\s*[:：]\s*4|3\s*[:：]\s*2|2\s*[:：]\s*3|21\s*[:：]\s*9))(?![\d:：])")
+    ratios = {validate_aspect_ratio(m.group(1)) for pattern in (ratio_flag, labelled, bare) for m in pattern.finditer(prompt)}
+    selected = validate_aspect_ratio(aspect_ratio or "auto")
+    if selected != "auto":
+        ratios.add(selected)
+    if len(ratios) > 1:
+        raise ImageGenError("MJ 请求包含不同的画面比例；请保留一个比例。本次未发送，不会扣费。")
+    selected = next(iter(ratios), "auto")
+    cleaned = ratio_flag.sub("", prompt).strip()
+    if re.search(r"(?<!\S)--(?:ar|aspect)(?:\s|$)", cleaned, re.IGNORECASE):
+        raise ImageGenError("MJ 的 --ar 比例格式无效；例如 --ar 16:9。本次未发送，不会扣费。")
+    if selected != "auto":
+        cleaned += " --ar " + selected
+    return cleaned, selected
+
+
+def validate_midjourney_options(args: argparse.Namespace, image_paths: list, reference_urls: list) -> None:
+    """Keep unsupported controls out of the single paid MJ submit."""
+    if image_paths or reference_urls or args.mask or args.mode == "edit":
+        raise ImageGenError("当前 MJ 通道只支持文字生图，不支持参考图或编辑。本次未发送，不会扣费。")
+    if args.n not in (1, 4):
+        raise ImageGenError("MJ 每次请求固定返回 4 张图片；不要指定 2/3 张。本次未发送，不会扣费。")
+    if args.story_pages is not None or args.story_next is not None:
+        raise ImageGenError("MJ 固定四张且不支持参考图，不能用于当前连续分镜编辑流程。本次未发送。")
+    if args.stream or args.async_mode or args.webhook or args.metadata:
+        raise ImageGenError("当前 MJ 接口使用单次请求等待完整图片，不支持 --stream/--async/webhook/metadata。请省略这些参数。")
+    if args.quality != "auto" or args.background or args.input_fidelity:
+        raise ImageGenError("MJ 风格与质量请在提示词中使用 --q、--hd 等支持的标记，不使用通用图片质量参数。")
+    if args.size is not None:
+        raise ImageGenError("MJ 当前没有 1K/2K/4K/8K 或精确像素的原生尺寸参数；请省略 --size，按返回图片的实际像素交付。明确需要本地放大时使用 --output-size，并说明这不是原生 4K。本次未发送，不会扣费。")
+
+
+def midjourney_request_payload(model: str, prompt: str, aspect_ratio: str = "auto") -> dict[str, str]:
+    prepared, _ = prepare_midjourney_prompt(prompt, aspect_ratio)
+    return {"model": model, "prompt": prepared}
 
 
 def _dimensions_from_image_bytes(data: bytes, mime: str, label: str) -> tuple[int, int]:
@@ -1320,6 +1382,14 @@ def call_api(
     idempotency_key: str = "",
 ) -> dict[str, Any]:
     """Call the JSON generations endpoint."""
+    if model in MIDJOURNEY_MODELS:
+        if image_urls or stream or async_mode or webhook or metadata or count not in (1, 4):
+            raise ImageGenError("Unsupported MJ request options; request was not sent")
+        return _post_image_request(
+            endpoint, key,
+            json.dumps(midjourney_request_payload(model, prompt, aspect_ratio), ensure_ascii=False).encode("utf-8"),
+            "application/json", timeout, idempotency_key,
+        )
     payload: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
@@ -3823,6 +3893,8 @@ def main() -> int:
                         "model": model,
                         "model_migrated": model_migrated,
                         "supported_models": list(SUPPORTED_MODELS),
+                        "model_shortcuts": MODEL_SHORTCUTS,
+                        "midjourney": {"images_per_request": 4, "exact_resolution_parameter": False},
                         "prompt_limit": None,
                         "supported_modes": [
                             "generate",
@@ -3884,6 +3956,13 @@ def main() -> int:
         )
         validate_initial_model_selection(marker_override, model)
         raw_prompt = selected_prompt
+        is_midjourney = model in MIDJOURNEY_MODELS
+        if is_midjourney:
+            validate_midjourney_options(args, image_paths, reference_urls)
+            args.n = 4
+            raw_prompt, mj_ratio = prepare_midjourney_prompt(raw_prompt, args.aspect_ratio)
+            args.aspect_ratio = mj_ratio
+            requested_size = "native"
         requested_model = model
         actual_model = model
         model_fallback = None
@@ -3905,7 +3984,7 @@ def main() -> int:
                 output_width, output_height = parse_output_size(args.output_size)
             except PostprocessError as exc:
                 raise ImageGenError(str(exc)) from exc
-            if args.size is None:
+            if args.size is None and not is_midjourney:
                 longest = max(output_width, output_height)
                 requested_size = (
                     "1K"
@@ -3918,6 +3997,8 @@ def main() -> int:
                 )
             if aspect_ratio == "auto":
                 aspect_ratio = (
+                    f"{output_width // math.gcd(output_width, output_height)}:{output_height // math.gcd(output_width, output_height)}"
+                    if is_midjourney else
                     "1:1"
                     if output_width == output_height
                     else "3:2"
@@ -4441,6 +4522,10 @@ def main() -> int:
             "preview_files": preview_files,
             "download_files": download_files,
         }
+        if is_midjourney:
+            success_payload["actual_sizes"] = saved_actual_sizes
+            success_payload["resolution_note"] = "MJ 按上游原始像素交付；提示词中的 4K 或 --hd 不等于精确 4K 输出承诺。"
+            success_payload["images_per_request"] = 4
         if story_payload is not None:
             success_payload["story"] = story_payload
         cached_success_payload = dict(success_payload)
