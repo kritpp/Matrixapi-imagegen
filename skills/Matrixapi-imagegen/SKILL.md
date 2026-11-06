@@ -44,6 +44,12 @@ Preserve the customer's explicit
 geometry instead of overriding it with a square default; report actual output
 dimensions. Native 2K/4K GIF output has not been verified on these routes, so do
 not promise that resolution or silently resize to pretend it was returned.
+`aspect_ratio` / `requested_aspect_ratio` describe the requested shape, never a
+model-reported or measured result. Use local pixel-based `image_dimensions`,
+`actual_aspect_ratios`, and `display_summary` for the actual result. If
+`aspect_ratio_warning` is present, deliver the original and show the warning;
+do not claim the requested ratio was met. Exact integer-ratio differences may
+be small rounding differences, so do not infer a cause from the flag alone.
 
 ### GPT Image 2.6 animated GIF
 
@@ -204,7 +210,12 @@ Example: `python scripts/generate.py --task-id <fresh-id> --prompt "生成蓝色
    `![generated image](C:/.../image.png)`
    `[点击打开或下载原图](C:/.../image.png)`
    Then print the terminal result's `display_summary` on its own line directly
-   below the image links (for example, `实际尺寸：1672×941｜比例：16:9`).
+   below the image links (for example,
+   `实际尺寸：1536×864｜实际比例：16:9｜请求比例：16:9`).
+   For multiple files, use the matching `display_summaries` entry when present.
+   Show `aspect_ratio_warning` once when present. A delivered image can have
+   `ok: true` while `requested_output_satisfied: false`; display the saved image
+   and explain the unmet shape requirement, without a second generation.
    The display summary intentionally omits quality because the website may
    normalize quality for a specific upstream channel.
    This is local metadata formatting only; never issue another API request to

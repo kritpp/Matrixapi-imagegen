@@ -8,7 +8,7 @@ Current release: **v1.9.2**
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.9.2](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.9.2/Matrixapi-imagegen-v1.9.2.zip)
+[下载 Matrixapi-imagegen v1.9.2](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.9.2/Matrixapi-imagegen-v1.9.2.zip?revision=ratio-20261106)
 
 解压后按系统运行安装程序：
 
@@ -282,3 +282,7 @@ Never commit API keys or other credentials to this repository.
 MJ 分组直接描述画面默认普通版；Fast用`-m8f`，Turbo用`-m8t`。四张图仍是一次请求。结果记录接口等待、轮询和下载时间；URL图片最多四路并发下载，完成后立即交给Codex展示。
 
 新建 GIF 任务不支持 `--frame-count` / `--frame-duration-ms`；误传时在本地停止，不发送付费请求。旧任务仍可恢复已有原图，参数不符会如实提示，不重复生成。
+
+### 请求比例与实际比例
+
+`16:9` 表示请求目标，不代表模型一定按比例返回。技能从本地原图读取像素，分别显示实际尺寸、实际比例与请求比例。例如请求16:9、返回508×337，会显示实际约1.51:1并提示不完全一致。整数像素带来的微小差异也会如实标识；偏差提示本身不证明失败原因。不会裁剪、拉伸、补帧或自动再次收费生成。

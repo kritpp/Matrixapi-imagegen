@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -55,7 +56,7 @@ class UpdateError(RuntimeError):
 def _resolve_archive_urls() -> tuple[str, str]:
     request = urllib.request.Request(
         REPOSITORY_CONTENTS_API,
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "Matrixapi-imagegen-updater/1.0"},
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "Matrixapi-imagegen-updater/1.0", "Cache-Control": "no-cache"},
     )
     last_error: Exception | None = None
     for attempt in range(2):
@@ -70,6 +71,9 @@ def _resolve_archive_urls() -> tuple[str, str]:
                 match = PACKAGE_NAME_PATTERN.fullmatch(str(item.get("name", "")))
                 download_url = str(item.get("download_url", ""))
                 if match and download_url.startswith("https://"):
+                    content_sha = str(item.get("sha") or "")
+                    if re.fullmatch(r"[0-9a-f]{40,64}", content_sha):
+                        download_url += ("&" if "?" in download_url else "?") + "content_sha=" + content_sha
                     candidates.append((tuple(map(int, match.groups())), match.group(0), download_url))
             if not candidates:
                 raise UpdateError("The GitHub repository does not contain a release package")
@@ -302,6 +306,16 @@ def _installed_check(target: Path) -> dict:
     return payload
 
 
+def _same_managed_content(target: Path, staged: Path) -> bool:
+    for path in staged.rglob("*"):
+        if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        installed = target / path.relative_to(staged)
+        if not installed.is_file() or hashlib.sha256(installed.read_bytes()).digest() != hashlib.sha256(path.read_bytes()).digest():
+            return False
+    return True
+
+
 def update_skill(archive_url: str, target: Path) -> dict:
     lock_path = target.parent / f".{target.name}.update.lock"
     try:
@@ -325,7 +339,7 @@ def update_skill(archive_url: str, target: Path) -> dict:
         expected_version = _archive_version(archive_urls[0])
         installed_before = _installed_check(target)
         installed_version = str(installed_before.get("skill_version") or "")
-        if installed_version and _version_key(expected_version) <= _version_key(installed_version):
+        if installed_version and _version_key(expected_version) < _version_key(installed_version):
             installed_before["_update_skipped"] = True
             return installed_before
         archive_data = _download_archive(archive_urls)
@@ -336,6 +350,10 @@ def update_skill(archive_url: str, target: Path) -> dict:
             staged.mkdir()
             _extract_skill(archive_data, staged)
             _validate_staged_skill(staged, expected_version)
+            if installed_version == expected_version and _same_managed_content(target, staged):
+                installed_before["_update_skipped"] = True
+                installed_before["_content_checked"] = True
+                return installed_before
             backup = _replace_skill(target, staged, keep_backup=True)
         if backup is None:
             raise UpdateError("The updater did not create a rollback backup")

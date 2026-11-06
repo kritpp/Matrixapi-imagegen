@@ -1384,6 +1384,7 @@ def apply_media_metadata(payload: dict[str, Any]) -> None:
     # Cached success flags/metadata are not evidence of exact frame delivery.
     if payload.get("api_output_format") == "gif" or "media" not in payload:
         payload["media"] = media_metadata(files)
+    apply_dimension_metadata(payload)
     if payload.get("api_output_format") == "gif":
         animated = bool(payload["media"]) and all(m.get("format") == "gif" and m.get("animated") for m in payload["media"])
         payload["animation_returned"] = animated
@@ -1393,6 +1394,10 @@ def apply_media_metadata(payload: dict[str, Any]) -> None:
         if animated:
             first = payload["media"][0]
             payload["display_summary"] = summary + f"｜GIF 动图：{first['frame_count']} 帧｜时长：{first['duration_ms']} ms"
+            summaries = payload.get("display_summaries", [])
+            for index, media in enumerate(payload["media"]):
+                if index < len(summaries):
+                    summaries[index] += f"｜GIF 动图：{media['frame_count']} 帧｜时长：{media['duration_ms']} ms"
         requested = payload.get("native_output") or {}
         payload["animation_control_policy"] = (
             "explicit_legacy_request" if any(k in requested for k in ("frame_count", "frame_duration_ms"))
@@ -1417,6 +1422,10 @@ def apply_media_metadata(payload: dict[str, Any]) -> None:
             payload["error_kind"] = "animation_controls_mismatch"
             payload["error"] = "已收到原生 GIF，但未满足本次指定的帧数或帧时长。原图已完整保存；不能报告为请求完成，也不能自动重发。"
             payload["output_warning"] = "上游已返回结果，可能已计费。请交付原图并列明请求与实际参数；不删帧、不补帧、不重发。"
+    if payload.get("requested_aspect_ratio_satisfied") is False:
+        # Delivery can succeed even though the requested shape was not met.
+        # Preserve the original result and billing state; never retry here.
+        payload["requested_output_satisfied"] = False
 
 
 
@@ -3492,6 +3501,56 @@ def _utc_millis_text(timestamp_ms: int) -> str:
     return f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(seconds))}.{millis:03d}Z"
 
 
+def dimension_metadata(actual_size: str, requested_ratio: str) -> dict[str, Any]:
+    """Compare requested shape with local file pixels; no network or rewriting."""
+    actual = str(actual_size or "").strip().lower().replace("×", "x")
+    pixels = re.fullmatch(r"([1-9]\d*)\s*x\s*([1-9]\d*)", actual)
+    requested = str(requested_ratio or "auto").strip().replace("：", ":") or "auto"
+    ratio = re.fullmatch(r"([1-9]\d*)\s*:\s*([1-9]\d*)", requested)
+    result = {"actual_size": "未知", "actual_aspect_ratio": None,
+              "actual_aspect_ratio_label": "未知", "requested_aspect_ratio": requested,
+              "aspect_ratio_exact_match": None}
+    if not pixels:
+        return result
+    width, height = map(int, pixels.groups())
+    divisor = math.gcd(width, height)
+    rw, rh = width // divisor, height // divisor
+    exact = f"{rw}:{rh}"
+    result.update({"actual_size": f"{width}×{height}", "actual_aspect_ratio": exact,
+                   "actual_aspect_ratio_label": exact if max(rw, rh) <= 24 else f"约{width / height:.2f}:1"})
+    if ratio:
+        requested_width, requested_height = map(int, ratio.groups())
+        result["aspect_ratio_exact_match"] = width * requested_height == height * requested_width
+    return result
+
+
+def apply_dimension_metadata(payload: dict[str, Any]) -> None:
+    """Refresh dimensions even when recovering a result cached by an old skill."""
+    files = payload.get("preview_files") or payload.get("files") or []
+    if not files:
+        return
+    requested = payload.get("requested_aspect_ratio", payload.get("aspect_ratio", "auto"))
+    details = []
+    for path in files:
+        row = dimension_metadata(_actual_size_from_image_file(path), requested)
+        details.append(row)
+    payload["image_dimensions"] = details
+    payload["requested_aspect_ratio"] = requested
+    payload["actual_aspect_ratios"] = [item["actual_aspect_ratio"] for item in details]
+    checks = [item["aspect_ratio_exact_match"] for item in details]
+    payload["requested_aspect_ratio_satisfied"] = (
+        False if False in checks else True if checks and all(item is True for item in checks) else None
+    )
+    payload["display_summaries"] = [format_display_summary(
+        payload.get("requested_size", ""), item["actual_size"], "", requested
+    ) for item in details]
+    payload["display_summary"] = payload["display_summaries"][0]
+    if False in checks:
+        payload["aspect_ratio_warning"] = "实际比例与请求比例不完全一致；原图已保留，不裁剪、不拉伸、不自动重发。"
+    else:
+        payload.pop("aspect_ratio_warning", None)
+
+
 def format_display_summary(
     requested_size: str,
     actual_size: str,
@@ -3503,11 +3562,13 @@ def format_display_summary(
     Quality is intentionally omitted because the relay may normalize it for a
     provider, so showing the caller's local value can mislead customers.
     """
-    actual = str(actual_size or "").strip().replace("X", "×").replace("x", "×")
-    if not actual or actual.upper() in SIZE_ALIASES:
-        actual = "未知"
-    parts = [f"实际尺寸：{actual}"]
-    parts.append(f"比例：{str(aspect_ratio or 'auto').strip() or 'auto'}")
+    metadata = dimension_metadata(actual_size, aspect_ratio)
+    requested = metadata["requested_aspect_ratio"]
+    parts = [f"实际尺寸：{metadata['actual_size']}",
+             f"实际比例：{metadata['actual_aspect_ratio_label']}",
+             f"请求比例：{'默认' if requested == 'auto' else requested}"]
+    if metadata["aspect_ratio_exact_match"] is False:
+        parts.append("实际比例与请求不完全一致")
     return "｜".join(parts)
 
 
