@@ -7,7 +7,7 @@ description: Generate or edit bitmap images through the recipient's own OpenAI-c
 
 Generate or edit images with the bundled script and show the saved result to the user.
 
-## Version 1.9.1: native GIF and prompt delivery
+## Version 1.9.2: native GIF and prompt delivery
 
 Resolve the current turn's model before applying generic size, quality, editing,
 story, or async defaults. These controls are not shared by every model.
@@ -39,7 +39,8 @@ controls can appear anywhere in the prompt. For non-MJ models, translate an
 explicit ratio into `--aspect-ratio` (normalize Chinese colons); for MJ, use its
 existing ratio flow below. With no ratio request, leave `--aspect-ratio auto`.
 Treat `2K` / `4K` as an explicit size request for supported non-MJ routes. GIF
-frame count and duration are optional too. Preserve the customer's explicit
+frame count and timing follow upstream defaults; do not add frame controls.
+Preserve the customer's explicit
 geometry instead of overriding it with a square default; report actual output
 dimensions. Native 2K/4K GIF output has not been verified on these routes, so do
 not promise that resolution or silently resize to pretend it was returned.
@@ -50,17 +51,21 @@ When the user requests a GIF animation/动图 (including `gif`, `GIF`, or `Gif`)
 with `-f2.6` or `-s2.6`, request
 native animation from the image API. Do not say the Images endpoint only returns
 stills. Add `--api-output-format gif`; this sends upstream `output_format: gif`.
-Optional `--frame-count 2..16`, `--frame-duration-ms` (at least 20) and
-`--complexity low|medium|high` are distinct from quality. Use 896x896 only when
-neither dimensions nor an aspect ratio was requested; use up to 8 frames when
-the frame count was not specified, following the upstream stability recommendation.
+Use the upstream default frame count and timing: omit `--frame-count` and
+`--frame-duration-ms`. Current samples return 9 frames at either 120 or 200 ms
+each, depending on the route. These are observations, not guarantees. Never force 4 or
+8 frames. New requests with explicit frame-control flags stop locally without
+a paid submit; those flags remain available only to recover already-paid legacy
+tasks. If a customer requires exact frame parameters, explain that this route
+currently does not support them before submitting; do not silently replace an
+explicit requirement. `--complexity low|medium|high` remains separate from
+quality. Use 896x896 only when neither dimensions nor an aspect ratio was requested.
 If only a ratio is supplied, pass `--size 1K --aspect-ratio <ratio>` through the
 existing tier-to-geometry flow instead of sending a square 896x896. Explicit
-dimensions or 2K/4K requests take precedence over this default. Omitted frame
-settings use the upstream defaults (9 frames, 200 ms). Keep 2.6 quality auto/high;
+dimensions or 2K/4K requests take precedence over this default. Keep 2.6 quality auto/high;
 this does not enable max. Ordinary still generation keeps its existing defaults.
 
-Example: `python scripts/generate.py --task-id <fresh-id> --prompt "蓝色钟摆左右摆动的循环GIF，-f2.6" --size 896x896 --api-output-format gif --frame-count 8 --frame-duration-ms 200`
+Example: `python scripts/generate.py --task-id <fresh-id> --prompt "蓝色钟摆左右摆动的循环GIF，-f2.6" --size 896x896 --api-output-format gif`
 
 GIF uses the same one-submit generation/edit route and task recovery. The local
 `--output-format` flag is a separate still-image conversion option; do not use
@@ -68,10 +73,15 @@ it to request animation. No local resize/crop/re-encoding, storyboard stitching,
 or still-to-GIF renaming is permitted as a substitute for native animation.
 The script saves original bytes with `.gif`, inspects the complete container,
 and returns `media` with frame count/durations plus `requested_output_satisfied`.
-Only report animated GIF success when `ok` and `requested_output_satisfied` are
-true. Also show `output_warning` and `animation_control_mismatches` when present:
-`animation_controls_satisfied: false` means the upstream changed requested frame
-settings. Report actual frames/durations; do not claim exact parameter compliance. If the upstream returns a still, explain that this request did not produce
+Only report the requested GIF as completed when `ok` and
+`requested_output_satisfied` are true. `animation_returned: true` alone confirms
+animation, not compliance with the requested frames or timing. A mismatch sets
+`ok: false`, `requested_output_satisfied: false`, and
+`error_kind: animation_controls_mismatch`. Deliver the saved original and show
+the requested versus actual parameters from `animation_control_mismatches`.
+The upstream returned a result and may already have charged it; this is not
+permission to retry, switch routes, trim frames, or rewrite timing. Resume the
+same task only to recover its existing result. If the upstream returns a still, explain that this request did not produce
 animation, retain its original file, and never automatically submit again.
 Render returned GIF paths directly; if the client's inline renderer freezes a
 frame, provide the original GIF link without replacing it with a PNG preview.

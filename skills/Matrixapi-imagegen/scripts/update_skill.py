@@ -393,7 +393,7 @@ def main() -> int:
                         +
                         f"当前模型：{current_model}；"
                         f"支持模型：{', '.join(str(item) for item in supported_models)}；"
-                        + "简称可放在提示词任意位置：-f2.5 / -s2.5 / -f2.6 / -s2.6 / -m8f / -m8t；MJ 分组默认普通版，Fast/Turbo 需明确简称；2.6 支持请求原生GIF、帧数和帧时长，以实际返回动画为准；MJ 每次四张，比例可写16：9，不保证原生4K；"
+                        + "简称可放在提示词任意位置：-f2.5 / -s2.5 / -f2.6 / -s2.6 / -m8f / -m8t；MJ 分组默认普通版，Fast/Turbo 需明确简称；2.6 支持原生GIF，帧数和时长跟随上游默认，完整保存并显示实际参数；MJ 每次四张，比例可写16：9，不保证原生4K；"
                         + restart_message
                     ),
                     "restart_required": not update_skipped,

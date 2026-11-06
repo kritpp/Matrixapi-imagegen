@@ -58,7 +58,7 @@ LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.9.1"
+SKILL_VERSION = "1.9.2"
 MODEL_SHORTCUTS = {
     "f2.5": FLARE_IMAGE_MODEL, "s2.5": SUNBURST_IMAGE_MODEL,
     "f2.6": FLARE_26_IMAGE_MODEL, "s2.6": SUNBURST_26_IMAGE_MODEL,
@@ -1380,19 +1380,24 @@ def apply_media_metadata(payload: dict[str, Any]) -> None:
     files = payload.get("original_files") or payload.get("files") or []
     if not files:
         return
-    if "media" not in payload:
+    # Reinspect the original GIF even for a reused result from an older skill.
+    # Cached success flags/metadata are not evidence of exact frame delivery.
+    if payload.get("api_output_format") == "gif" or "media" not in payload:
         payload["media"] = media_metadata(files)
     if payload.get("api_output_format") == "gif":
-        satisfied = bool(payload["media"]) and all(m.get("format") == "gif" and m.get("animated") for m in payload["media"])
-        payload["requested_output_satisfied"] = satisfied
-        if not satisfied:
-            payload["ok"] = False
-            payload["error_kind"] = "animation_not_returned"
-            payload["error"] = "上游返回了图片，但未返回可确认的多帧 GIF。原始结果已保存；本次不重发、不冒充动画。"
-        else:
+        animated = bool(payload["media"]) and all(m.get("format") == "gif" and m.get("animated") for m in payload["media"])
+        payload["animation_returned"] = animated
+        # This helper can run before caching and again when emitting/recovering.
+        summary = re.sub(r"(?:｜)?GIF 动图：\d+ 帧｜时长：\d+ ms$", "", str(payload.get("display_summary", "")))
+        payload["display_summary"] = summary
+        if animated:
             first = payload["media"][0]
-            payload["display_summary"] = payload.get("display_summary", "") + f"｜GIF 动图：{first['frame_count']} 帧｜时长：{first['duration_ms']} ms"
+            payload["display_summary"] = summary + f"｜GIF 动图：{first['frame_count']} 帧｜时长：{first['duration_ms']} ms"
         requested = payload.get("native_output") or {}
+        payload["animation_control_policy"] = (
+            "explicit_legacy_request" if any(k in requested for k in ("frame_count", "frame_duration_ms"))
+            else "upstream_default"
+        )
         mismatches = []
         for index, media in enumerate(payload["media"], 1):
             if "frame_count" in requested and media.get("frame_count") != requested["frame_count"]:
@@ -1400,10 +1405,18 @@ def apply_media_metadata(payload: dict[str, Any]) -> None:
             durations = media.get("frame_durations_ms", [])
             if "frame_duration_ms" in requested and (not durations or any(d != requested["frame_duration_ms"] for d in durations)):
                 mismatches.append({"image":index,"parameter":"frame_duration_ms","requested":requested["frame_duration_ms"],"actual":durations})
-        payload["animation_controls_satisfied"] = satisfied and not mismatches
+        payload["requested_output_satisfied"] = animated and not mismatches
+        payload["animation_controls_satisfied"] = animated and not mismatches
         payload["animation_control_mismatches"] = mismatches
-        if mismatches:
-            payload["output_warning"] = "已收到原生 GIF，但上游返回的帧数或帧时长与请求不一致。按实际原图交付，不删帧、不补帧、不重发。"
+        if not animated:
+            payload["ok"] = False
+            payload["error_kind"] = "animation_not_returned"
+            payload["error"] = "上游返回了图片，但未返回可确认的多帧 GIF。原始结果已保存；本次不重发、不冒充动画。"
+        elif mismatches:
+            payload["ok"] = False
+            payload["error_kind"] = "animation_controls_mismatch"
+            payload["error"] = "已收到原生 GIF，但未满足本次指定的帧数或帧时长。原图已完整保存；不能报告为请求完成，也不能自动重发。"
+            payload["output_warning"] = "上游已返回结果，可能已计费。请交付原图并列明请求与实际参数；不删帧、不补帧、不重发。"
 
 
 
@@ -3115,6 +3128,7 @@ def recover_submitted_task(
             expected_count=expected_count,
         )
     payload = _recovery_payload(record, files, recovery_output_dir)
+    apply_media_metadata(payload)
     if payload.get("postprocess"):
         update_idempotency_local_stage(
             record_path,
@@ -3130,14 +3144,13 @@ def recover_submitted_task(
         task_id,
         payload=payload,
     )
-    emit_success(
+    return emit_success(
         payload,
         recovery_output_dir,
         task_id,
         int(record.get("request_started_at_ms") or time.time_ns() // 1_000_000),
         cleanup_paths=[record_path],
     )
-    return payload
 
 
 def emit_reused_success(
@@ -3588,7 +3601,7 @@ def emit_success(
     result_path = result_record_path(output_dir, task_id)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     enriched = dict(payload)
-    if "requested_output_satisfied" not in enriched:
+    if enriched.get("api_output_format") == "gif" or "requested_output_satisfied" not in enriched:
         apply_media_metadata(enriched)
     enriched.update(
         {
@@ -3683,8 +3696,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality", choices=sorted(QUALITY_VALUES), default="auto")
     parser.add_argument("--api-output-format", choices=("png", "jpeg", "webp", "gif"), help="Upstream image encoding; gif requests native animated output (not a local conversion)")
-    parser.add_argument("--frame-count", type=int, help="GPT Image 2.6 GIF frames, 2-16")
-    parser.add_argument("--frame-duration-ms", type=int, help="GPT Image 2.6 GIF frame duration, at least 20 ms")
+    parser.add_argument("--frame-count", type=int, help="Legacy task recovery only; new GIF requests use upstream default frames")
+    parser.add_argument("--frame-duration-ms", type=int, help="Legacy task recovery only; new GIF requests use upstream default timing")
     parser.add_argument("--complexity", choices=("low", "medium", "high"), help="GPT Image 2.6 complexity, independent of quality")
     parser.add_argument("--stream", action="store_true", help="Request SSE output")
     parser.add_argument(
@@ -4292,7 +4305,7 @@ def main() -> int:
                 task_id = str(cached_payload.get("task_id") or task_id)
                 request_submitted = True
                 story_state_owned = story_path is not None
-                recover_submitted_task(
+                recovered = recover_submitted_task(
                     cached_payload,
                     idempotency_record,
                     idempotency_lock,
@@ -4302,7 +4315,7 @@ def main() -> int:
                     key,
                     args.timeout,
                 )
-                return 0
+                return 0 if recovered.get("ok") else 1
             if cached_payload.get("_local_task_files"):
                 local_files = cached_payload.get("_local_task_files") or []
                 recovered_payload = _recovery_payload(
@@ -4314,22 +4327,32 @@ def main() -> int:
                     local_files,
                     output_dir,
                 )
-                emit_success(
+                recovered = emit_success(
                     recovered_payload,
                     output_dir,
                     task_id,
                     request_started_at_ms,
                     cleanup_paths=[idempotency_record],
                 )
-                return 0
-            emit_reused_success(
+                return 0 if recovered.get("ok") else 1
+            reused = emit_reused_success(
                 cached_payload,
                 output_dir,
                 task_id,
                 request_started_at_ms,
                 record_path=idempotency_record,
             )
-            return 0
+            return 0 if reused.get("ok") else 1
+        if native_options.get("output_format") == "gif" and any(
+            name in native_options for name in ("frame_count", "frame_duration_ms")
+        ):
+            # Recover an already-paid legacy task above, but do not submit a
+            # new precise-control request that this upstream cannot honor.
+            raise ImageGenError(
+                "当前 GIF 使用上游默认帧数和每帧时长，不支持新建指定帧参数的任务。"
+                "本次未发送、未计费；使用 --api-output-format gif 即可，"
+                "无需 --frame-count 或 --frame-duration-ms。已有任务仍可原样恢复。"
+            )
         update_idempotency_request(
             idempotency_record,
             task_id,

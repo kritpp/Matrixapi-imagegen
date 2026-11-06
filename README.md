@@ -2,13 +2,13 @@
 
 This repository distributes the `Matrixapi-imagegen` Codex Skill for image generation, reference-image editing, masked local repainting, and deterministic local image delivery through the `matrixapii.com` relay. It is adapted from the original author's v1.4.3 source.
 
-Current release: **v1.9.1**
+Current release: **v1.9.2**
 
 ## 安装 Install
 
 ### 一键安装包（推荐）
 
-[下载 Matrixapi-imagegen v1.9.1](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.9.1/Matrixapi-imagegen-v1.9.1.zip)
+[下载 Matrixapi-imagegen v1.9.2](https://github.com/kritpp/Matrixapi-imagegen/releases/download/v1.9.2/Matrixapi-imagegen-v1.9.2.zip)
 
 解压后按系统运行安装程序：
 
@@ -19,7 +19,7 @@ Current release: **v1.9.1**
 `https://matrixapii.com` 已固定在 Skill 内部，无需输入或配置。安装完成后必须
 重启 Codex。
 
-v1.9.1 新增 GPT Image 2.6 与 Midjourney 三种模式，统一支持提示词任意位置的模型简称。安装与更新结果会列出完整支持模型和简称。
+v1.9.2 新增 GPT Image 2.6 与 Midjourney 三种模式，统一支持提示词任意位置的模型简称。安装与更新结果会列出完整支持模型和简称。
 
 | 简称（提示词任意位置） | 完整请求模型 | 用途 |
 | --- | --- | --- |
@@ -41,7 +41,7 @@ v1.9.1 新增 GPT Image 2.6 与 Midjourney 三种模式，统一支持提示词�
 
 **比例不是必填项。**不写比例也可以生成；直接写 `16:9`、`16：9` 或 `9:16` 就能表达所需比例，不必加“比例”两个字，也不限定在提示词末尾。这些自然语言写法适用于普通生图和 2.6 GIF；MJ 按下方专用规则转发。
 
-GIF 的尺寸、帧数、每帧时长同样都是可选项。最简写法：`-f2.6 生成小猫挥手的 gif 动图`；横屏写法：`-f2.6 生成小猫挥手的 gif 动图，16:9`；带尺寸需求可写 `-s2.6 小猫挥手的 gif 动图，2K，9:16`。`gif`、`GIF`、`Gif` 都可以。原生 2K/4K GIF 尚未完成实测验收，实际尺寸与帧参数以返回文件为准。
+GIF 的比例和尺寸可以省略；帧数和每帧时长统一跟随上游默认，无需填写。本轮不同线路实测为9帧、每帧120或200毫秒，以实际返回文件为准；不保证或强行改写成固定值。最简写法：`-f2.6 生成小猫挥手的 gif 动图`；横屏写法：`-f2.6 生成小猫挥手的 gif 动图，16:9`；带尺寸需求可写 `-s2.6 小猫挥手的 gif 动图，2K，9:16`。`gif`、`GIF`、`Gif` 都可以。原生 2K/4K GIF 尚未完成实测验收，实际尺寸与帧参数以返回文件为准。
 
 例如：`生成一张蓝色陶杯，-m8f，比例16：9`。客户也可写 `16:9` 或 `--ar 16:9`，放在提示词任意位置；技能会转成上游需要的末尾 `--ar` 参数。这不限制模型简称的位置。
 
@@ -275,8 +275,10 @@ Never commit API keys or other credentials to this repository.
 
 ## 2.6 原生 GIF 动图
 
-在提示词任意位置写 `-f2.6` 或 `-s2.6` 并说明“GIF 动图”，技能会向图片接口发送 `output_format: gif`，不是把静态图片改后缀。可指定帧数（2–16）和每帧时长（至少20毫秒）；未指定尺寸时建议896×896、最多8帧。2.6沿用high质量，不改成max。
+在提示词任意位置写 `-f2.6` 或 `-s2.6` 并说明“GIF 动图”，技能会向图片接口发送 `output_format: gif`，不是把静态图片改后缀。帧数和每帧时长由上游默认决定，不再指定4帧、8帧或160毫秒；没有尺寸或比例要求时使用896×896。2.6沿用high质量，不改成max。
 
-脚本参数：`--api-output-format gif --frame-count 8 --frame-duration-ms 200 --size 896x896`。仅当实际返回多帧GIF才报告动画成功；上游若只返回静态图，保留原图并明确提示，不自动再次收费生成。原始GIF按原字节保存。
+脚本参数：`--api-output-format gif --size 896x896`。仅当实际返回多帧GIF才报告动画成功；上游若只返回静态图，保留原图并明确提示，不自动再次收费生成。原始GIF按原字节保存。
 
 MJ 分组直接描述画面默认普通版；Fast用`-m8f`，Turbo用`-m8t`。四张图仍是一次请求。结果记录接口等待、轮询和下载时间；URL图片最多四路并发下载，完成后立即交给Codex展示。
+
+新建 GIF 任务不支持 `--frame-count` / `--frame-duration-ms`；误传时在本地停止，不发送付费请求。旧任务仍可恢复已有原图，参数不符会如实提示，不重复生成。
