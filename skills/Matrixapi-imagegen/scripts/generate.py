@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -24,8 +25,10 @@ import urllib.request
 import uuid
 
 try:
+    from animation import media_metadata
     from postprocess import PostprocessError, parse_output_size, process_many
 except ImportError:  # pragma: no cover - allows importing this file as a module
+    from .animation import media_metadata
     from .postprocess import PostprocessError, parse_output_size, process_many
 
 try:
@@ -55,7 +58,7 @@ LEGACY_GPT_IMAGE_MODEL = "gpt-image-2"
 GEMINI_IMAGE_MODEL = "gemini-3-pro-image-preview"
 GPT_IMAGE_2_5_MODELS = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 SKILL_NAME = "Matrixapi-imagegen"
-SKILL_VERSION = "1.9.0"
+SKILL_VERSION = "1.9.1"
 MODEL_SHORTCUTS = {
     "f2.5": FLARE_IMAGE_MODEL, "s2.5": SUNBURST_IMAGE_MODEL,
     "f2.6": FLARE_26_IMAGE_MODEL, "s2.6": SUNBURST_26_IMAGE_MODEL,
@@ -1349,6 +1352,61 @@ def _post_image_request(
         raise
 
 
+def native_output_options(args: argparse.Namespace, model: str) -> dict[str, Any]:
+    fmt = getattr(args, "api_output_format", None)
+    frames = getattr(args, "frame_count", None)
+    duration = getattr(args, "frame_duration_ms", None)
+    complexity = getattr(args, "complexity", None)
+    is_26 = model in {FLARE_26_IMAGE_MODEL, SUNBURST_26_IMAGE_MODEL}
+    if model in MIDJOURNEY_MODELS and any(v is not None for v in (fmt, frames, duration, complexity)):
+        raise ImageGenError("MJ does not accept GIF/frame/complexity parameters; request was not sent")
+    if (fmt == "gif" or complexity is not None) and not is_26:
+        raise ImageGenError("Native GIF/complexity controls are enabled only for the verified GPT Image 2.6 routes")
+    if any(v is not None for v in (frames, duration)) and fmt != "gif":
+        raise ImageGenError("Frame controls require --api-output-format gif")
+    if frames is not None and not 2 <= frames <= 16:
+        raise ImageGenError("--frame-count must be between 2 and 16")
+    if duration is not None and duration < 20:
+        raise ImageGenError("--frame-duration-ms must be at least 20")
+    if fmt == "gif" and (local_postprocess_requested(args) or args.process_only):
+        raise ImageGenError("Native GIF must be delivered unchanged; local post-processing could flatten the animation")
+    if fmt == "gif" and (args.story_pages is not None or args.story_next is not None):
+        raise ImageGenError("Use one native GIF request; story pages are separate still images")
+    return {k: v for k, v in {"output_format":fmt, "response_format":"url" if fmt == "gif" else None, "frame_count":frames,
+                             "frame_duration_ms":duration, "complexity":complexity}.items() if v is not None}
+
+
+def apply_media_metadata(payload: dict[str, Any]) -> None:
+    files = payload.get("original_files") or payload.get("files") or []
+    if not files:
+        return
+    if "media" not in payload:
+        payload["media"] = media_metadata(files)
+    if payload.get("api_output_format") == "gif":
+        satisfied = bool(payload["media"]) and all(m.get("format") == "gif" and m.get("animated") for m in payload["media"])
+        payload["requested_output_satisfied"] = satisfied
+        if not satisfied:
+            payload["ok"] = False
+            payload["error_kind"] = "animation_not_returned"
+            payload["error"] = "上游返回了图片，但未返回可确认的多帧 GIF。原始结果已保存；本次不重发、不冒充动画。"
+        else:
+            first = payload["media"][0]
+            payload["display_summary"] = payload.get("display_summary", "") + f"｜GIF 动图：{first['frame_count']} 帧｜时长：{first['duration_ms']} ms"
+        requested = payload.get("native_output") or {}
+        mismatches = []
+        for index, media in enumerate(payload["media"], 1):
+            if "frame_count" in requested and media.get("frame_count") != requested["frame_count"]:
+                mismatches.append({"image":index,"parameter":"frame_count","requested":requested["frame_count"],"actual":media.get("frame_count")})
+            durations = media.get("frame_durations_ms", [])
+            if "frame_duration_ms" in requested and (not durations or any(d != requested["frame_duration_ms"] for d in durations)):
+                mismatches.append({"image":index,"parameter":"frame_duration_ms","requested":requested["frame_duration_ms"],"actual":durations})
+        payload["animation_controls_satisfied"] = satisfied and not mismatches
+        payload["animation_control_mismatches"] = mismatches
+        if mismatches:
+            payload["output_warning"] = "已收到原生 GIF，但上游返回的帧数或帧时长与请求不一致。按实际原图交付，不删帧、不补帧、不重发。"
+
+
+
 def _option_fields(
     quality: str = "",
     background: str = "",
@@ -1865,6 +1923,8 @@ def _download_image_to_path(
                     handle.write(chunk)
             if total == 0:
                 raise ImageGenError("Generated image is empty")
+            if content_length.isdigit() and total != int(content_length):
+                raise ImageGenError("Generated image download is incomplete; original task is retained, no image request was repeated")
             return header, content_type
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ImageGenError(f"Unable to download the generated image: {exc}") from exc
@@ -1880,6 +1940,8 @@ def save_images(
     task_fingerprint: str | None = None,
     expected_count: int | None = None,
     actual_sizes: list[str] | None = None,
+    download_workers: int = 1,
+    download_timings: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1914,9 +1976,12 @@ def save_images(
     staged_paths: list[Path] = []
     final_paths: list[Path] = []
     staged_actual_sizes: list[str] = []
+    owned_paths: list[Path] = []
 
-    try:
-        for index, item in enumerate(items, start=1):
+    def save_item(pair):
+        index, item = pair
+        started = time.time_ns() // 1_000_000
+        try:
             content_type = ""
             if task_id and task_fingerprint:
                 prefix = _task_image_prefix(task_id, task_fingerprint)
@@ -1942,6 +2007,7 @@ def save_images(
                     actual_size = ""
                 stage_path = stage_path_base.with_suffix(suffix)
                 temp_path = stage_path.with_suffix(stage_path.suffix + ".part")
+                owned_paths.extend([temp_path, stage_path])
                 try:
                     temp_path.write_bytes(data)
                     temp_path.replace(stage_path)
@@ -1950,12 +2016,10 @@ def save_images(
                     raise ImageGenError(
                         f"Unable to save generated image: {exc}"
                     ) from exc
-                staged_paths.append(stage_path)
-                final_paths.append(final_path_base.with_suffix(suffix))
-                staged_actual_sizes.append(actual_size)
-                continue
+                return stage_path, final_path_base.with_suffix(suffix), actual_size
 
             stage_path = stage_path_base.with_suffix(".part")
+            owned_paths.append(stage_path)
             header, content_type = _download_image_to_path(
                 str(item["url"]), endpoint, key, timeout, stage_path
             )
@@ -1965,11 +2029,26 @@ def save_images(
             except ImageGenError:
                 actual_size = ""
             staged_path = stage_path.with_suffix(suffix)
+            owned_paths.append(staged_path)
             stage_path.replace(staged_path)
-            staged_paths.append(staged_path)
-            final_paths.append(final_path_base.with_suffix(suffix))
-            staged_actual_sizes.append(actual_size)
+            return staged_path, final_path_base.with_suffix(suffix), actual_size
+        finally:
+            if download_timings is not None:
+                completed = time.time_ns() // 1_000_000
+                download_timings.append({"index":index, "started_at_ms":started,
+                                         "completed_at_ms":completed,
+                                         "seconds":round((completed-started)/1000,3)})
 
+    try:
+        if download_workers > 1 and len(items) > 1:
+            with ThreadPoolExecutor(max_workers=min(4, download_workers, len(items))) as pool:
+                saved = list(pool.map(save_item, enumerate(items, start=1)))
+        else:
+            saved = [save_item(pair) for pair in enumerate(items, start=1)]
+        for staged_path, final_path, actual_size in saved:
+            staged_paths.append(staged_path)
+            final_paths.append(final_path)
+            staged_actual_sizes.append(actual_size)
         paths: list[str] = []
         for staged_path, final_path in zip(staged_paths, final_paths):
             staged_path.replace(final_path)
@@ -1985,6 +2064,8 @@ def save_images(
             except OSError:
                 pass
         for path in staged_paths:
+            path.unlink(missing_ok=True)
+        for path in owned_paths:
             path.unlink(missing_ok=True)
         for path in final_paths:
             path.unlink(missing_ok=True)
@@ -2287,7 +2368,7 @@ def _task_result_files_for_any_fingerprint(
 
 def _record_expected_count(record: dict[str, Any], fallback: int) -> int:
     context = record.get("request_context")
-    value = context.get("n") if isinstance(context, dict) else None
+    value = context.get("returned_image_count", context.get("n")) if isinstance(context, dict) else None
     try:
         count = int(value)
     except (TypeError, ValueError):
@@ -2847,6 +2928,8 @@ def mark_idempotency_submission(
             "updated_at_ms": time.time_ns() // 1_000_000,
         }
     )
+    if request_context.get("api_output_format") == "gif" and normalized.get("data"):
+        record["delivery_response"] = normalized
     try:
         _atomic_write_json(record_path, record)
     except ImageGenError:
@@ -2939,6 +3022,8 @@ def _recovery_payload(
         "ok": True,
         "skill_name": SKILL_NAME,
         "version": SKILL_VERSION,
+        "api_output_format": context.get("api_output_format"),
+        "native_output": context.get("native_output", {}),
         "task_id": task_id,
         "mode": mode,
         "model": str(context.get("model") or DEFAULT_MODEL),
@@ -3003,19 +3088,21 @@ def recover_submitted_task(
             allow_legacy=allow_legacy,
         )
     if not files:
-        upstream_task_id = str(record.get("upstream_task_id") or "").strip()
-        if not upstream_task_id:
-            raise ImageGenError(
-                "The original request was submitted but has no recoverable upstream task id; "
-                "it was not submitted again"
+        result = record.get("delivery_response")
+        if not isinstance(result, dict) or not result.get("data"):
+            upstream_task_id = str(record.get("upstream_task_id") or "").strip()
+            if not upstream_task_id:
+                raise ImageGenError(
+                    "The original request was submitted but has no recoverable upstream task id; "
+                    "it was not submitted again"
+                )
+            envelope = {"id": upstream_task_id}
+            result = wait_for_task(
+                envelope,
+                str(record.get("result_endpoint") or generation_endpoint_url),
+                key,
+                timeout,
             )
-        envelope = {"id": upstream_task_id}
-        result = wait_for_task(
-            envelope,
-            str(record.get("result_endpoint") or generation_endpoint_url),
-            key,
-            timeout,
-        )
         _remove_task_result_files(recovery_output_dir, task_id, record_fingerprint)
         files = save_images(
             result,
@@ -3501,6 +3588,8 @@ def emit_success(
     result_path = result_record_path(output_dir, task_id)
     result_path.parent.mkdir(parents=True, exist_ok=True)
     enriched = dict(payload)
+    if "requested_output_satisfied" not in enriched:
+        apply_media_metadata(enriched)
     enriched.update(
         {
             "task_id": task_id,
@@ -3593,6 +3682,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--quality", choices=sorted(QUALITY_VALUES), default="auto")
+    parser.add_argument("--api-output-format", choices=("png", "jpeg", "webp", "gif"), help="Upstream image encoding; gif requests native animated output (not a local conversion)")
+    parser.add_argument("--frame-count", type=int, help="GPT Image 2.6 GIF frames, 2-16")
+    parser.add_argument("--frame-duration-ms", type=int, help="GPT Image 2.6 GIF frame duration, at least 20 ms")
+    parser.add_argument("--complexity", choices=("low", "medium", "high"), help="GPT Image 2.6 complexity, independent of quality")
     parser.add_argument("--stream", action="store_true", help="Request SSE output")
     parser.add_argument(
         "--async",
@@ -3821,6 +3914,9 @@ def main() -> int:
         reference_urls = list(args.reference_urls or [])
         if args.process_only:
             task_id = normalize_task_id(args.task_id)
+            if any(getattr(args, name, None) is not None for name in
+                   ("api_output_format", "frame_count", "frame_duration_ms", "complexity")):
+                raise ImageGenError("--process-only does not submit native API/GIF controls; use a native generation request")
             if not image_paths:
                 raise ImageGenError("--process-only requires at least one --image file")
             if reference_urls or args.mask or args.stream or args.async_mode or args.webhook:
@@ -3893,7 +3989,7 @@ def main() -> int:
                         "model": model,
                         "model_migrated": model_migrated,
                         "supported_models": list(SUPPORTED_MODELS),
-                        "model_shortcuts": MODEL_SHORTCUTS,
+                        "model_shortcuts": {k: v for k, v in MODEL_SHORTCUTS.items() if k != "m8"},
                         "midjourney": {"images_per_request": 4, "exact_resolution_parameter": False},
                         "prompt_limit": None,
                         "supported_modes": [
@@ -3963,6 +4059,7 @@ def main() -> int:
             raw_prompt, mj_ratio = prepare_midjourney_prompt(raw_prompt, args.aspect_ratio)
             args.aspect_ratio = mj_ratio
             requested_size = "native"
+        native_options = native_output_options(args, model)
         requested_model = model
         actual_model = model
         model_fallback = None
@@ -4115,6 +4212,7 @@ def main() -> int:
                 "async": async_mode,
                 "webhook": args.webhook or "",
                 "metadata": metadata,
+                "native_output": native_options,
                 "background": args.background or "",
                 "input_fidelity": args.input_fidelity or "",
                 "reference_urls": reference_urls,
@@ -4159,6 +4257,8 @@ def main() -> int:
             "mode": mode,
             "model": requested_model,
             "actual_model": actual_model,
+            "api_output_format": args.api_output_format,
+            "native_output": native_options,
             "model_fallback": model_fallback,
             "provider": provider,
             "size": size,
@@ -4269,6 +4369,8 @@ def main() -> int:
         )
 
         options = _option_fields(quality, args.background, args.input_fidelity)
+        options.update(native_options)
+        submit_started_at_ms = time.time_ns() // 1_000_000
         if image_paths:
             # For auto local edits the pixel size is the source-ratio signal;
             # do not send a forced 1:1/3:2/2:3 enum that would re-compose it.
@@ -4324,6 +4426,7 @@ def main() -> int:
                 generation_url,
                 request_context,
             )
+            submit_received_at_ms = time.time_ns() // 1_000_000
             prompt_compacted = bool(result.pop("_matrixapi_prompt_compacted", False))
             prompt_limit = result.pop("_matrixapi_prompt_limit", None)
             result = resolve_image_task_response(
@@ -4385,12 +4488,23 @@ def main() -> int:
                 generation_url,
                 request_context,
             )
+            submit_received_at_ms = time.time_ns() // 1_000_000
             prompt_compacted = bool(result.pop("_matrixapi_prompt_compacted", False))
             prompt_limit = result.pop("_matrixapi_prompt_limit", None)
             result_endpoint = generation_url
             result = resolve_image_task_response(
                 result, generation_url, key, args.timeout, async_mode
             )
+        images_ready_at_ms = time.time_ns() // 1_000_000
+        # Some GIF routes return more than one result for n=1. Preserve bounded
+        # actual results rather than discarding a successful paid response.
+        returned_items = result.get("data") or result.get("results") or []
+        delivery_count = args.n
+        if args.api_output_format == "gif" and isinstance(returned_items, list) and args.n < len(returned_items) <= 4:
+            delivery_count = len(returned_items)
+            request_context["returned_image_count"] = delivery_count
+            mark_idempotency_submission(idempotency_record, task_id, result, generation_url, request_context)
+        download_timings: list[dict[str, Any]] = []
         saved_actual_sizes: list[str] = []
         files = save_images(
             result,
@@ -4400,13 +4514,16 @@ def main() -> int:
             args.timeout,
             task_id=task_id,
             task_fingerprint=idempotency_fingerprint,
-            expected_count=args.n,
+            expected_count=delivery_count,
             actual_sizes=saved_actual_sizes,
+            download_workers=4 if is_midjourney else 1,
+            download_timings=download_timings,
         )
         if postprocess_requested:
             update_idempotency_local_stage(
                 idempotency_record, task_id, files
             )
+        downloads_completed_at_ms = time.time_ns() // 1_000_000
         original_files = preview_paths(files)
         processed_files = files.copy()
         postprocess_manifest = None
@@ -4491,6 +4608,11 @@ def main() -> int:
             "model_fallback": model_fallback,
             "provider": provider,
             "count": len(files),
+            "requested_count": args.n,
+            "additional_results_returned": len(files) > args.n,
+            "api_output_format": args.api_output_format,
+            "native_output": native_options,
+            "delivery_timing": {"submit_started_at_ms":submit_started_at_ms, "submit_received_at_ms":submit_received_at_ms, "images_ready_at_ms":images_ready_at_ms, "downloads_completed_at_ms":downloads_completed_at_ms, "submit_seconds":round((submit_received_at_ms-submit_started_at_ms)/1000,3), "poll_seconds":round((images_ready_at_ms-submit_received_at_ms)/1000,3), "download_seconds":round((downloads_completed_at_ms-images_ready_at_ms)/1000,3), "downloads":download_timings},
             "prompt_limit": prompt_limit,
             "prompt_compacted": prompt_compacted,
             "prompt_original_chars": original_prompt_chars,
@@ -4528,6 +4650,7 @@ def main() -> int:
             success_payload["images_per_request"] = 4
         if story_payload is not None:
             success_payload["story"] = story_payload
+        apply_media_metadata(success_payload)
         cached_success_payload = dict(success_payload)
         cached_success_payload["task_id"] = task_id
         finish_idempotency(
@@ -4544,7 +4667,7 @@ def main() -> int:
             request_started_at_ms,
             cleanup_paths=[idempotency_record],
         )
-        return 0
+        return 0 if success_payload.get("ok") else 1
     except ImageGenError as exc:
         # A concrete HTTP response or terminal task status is final. Only a
         # post-submit outcome that cannot be confirmed retains recovery state.

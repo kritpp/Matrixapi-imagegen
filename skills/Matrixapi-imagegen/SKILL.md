@@ -7,7 +7,7 @@ description: Generate or edit bitmap images through the recipient's own OpenAI-c
 
 Generate or edit images with the bundled script and show the saved result to the user.
 
-## Version 1.9.0: model controls and Midjourney
+## Version 1.9.1: native GIF and prompt delivery
 
 Resolve the current turn's model before applying generic size, quality, editing,
 story, or async defaults. These controls are not shared by every model.
@@ -20,16 +20,62 @@ story, or async defaults. These controls are not shared by every model.
 | `-f2.6` | `gpt-image-2.6-flare` | 2.6 快速迭代与交互式创作 |
 | `-s2.6` | `gpt-image-2.6-sunburst` | 2.6 细致视觉创作与构图 |
 | 完整模型名 | `gemini-3-pro-image-preview` | 现有 Gemini 图片通道 |
-| `-m8` | `midjourney-v8.2` | MJ 普通模式 |
+| MJ 分组不指定简称 | `midjourney-v8.2` | 默认 MJ 普通模式 |
 | `-m8f` | `midjourney-v8.2-fast` | MJ Fast 模式 |
 | `-m8t` | `midjourney-v8.2-turbo` | MJ Turbo 模式 |
 
 Short controls can appear at the beginning, middle, or end, next to Chinese
 text or punctuation, or on another line. Bare `-f2.6` and `-m8f` work; legacy
-`模型-f2.5` and `技能-m8` also work. Keep the marker in the prompt passed to the
+`模型-f2.5` and `技能-m8f` also work. Keep the marker in the prompt passed to the
 script: deterministic parsing chooses the exact model and removes the marker.
 Different markers are a local error. Never inherit the previous turn's model.
 Do not expose channel billing aliases such as `-G` or `02` as request models.
+
+### Natural-language size and ratio controls
+
+An aspect ratio is optional. Bare `16:9`, `16：9`, or `9:16` in an image request
+means the requested ratio; the customer does not need to write “比例”. These
+controls can appear anywhere in the prompt. For non-MJ models, translate an
+explicit ratio into `--aspect-ratio` (normalize Chinese colons); for MJ, use its
+existing ratio flow below. With no ratio request, leave `--aspect-ratio auto`.
+Treat `2K` / `4K` as an explicit size request for supported non-MJ routes. GIF
+frame count and duration are optional too. Preserve the customer's explicit
+geometry instead of overriding it with a square default; report actual output
+dimensions. Native 2K/4K GIF output has not been verified on these routes, so do
+not promise that resolution or silently resize to pretend it was returned.
+
+### GPT Image 2.6 animated GIF
+
+When the user requests a GIF animation/动图 (including `gif`, `GIF`, or `Gif`)
+with `-f2.6` or `-s2.6`, request
+native animation from the image API. Do not say the Images endpoint only returns
+stills. Add `--api-output-format gif`; this sends upstream `output_format: gif`.
+Optional `--frame-count 2..16`, `--frame-duration-ms` (at least 20) and
+`--complexity low|medium|high` are distinct from quality. Use 896x896 only when
+neither dimensions nor an aspect ratio was requested; use up to 8 frames when
+the frame count was not specified, following the upstream stability recommendation.
+If only a ratio is supplied, pass `--size 1K --aspect-ratio <ratio>` through the
+existing tier-to-geometry flow instead of sending a square 896x896. Explicit
+dimensions or 2K/4K requests take precedence over this default. Omitted frame
+settings use the upstream defaults (9 frames, 200 ms). Keep 2.6 quality auto/high;
+this does not enable max. Ordinary still generation keeps its existing defaults.
+
+Example: `python scripts/generate.py --task-id <fresh-id> --prompt "蓝色钟摆左右摆动的循环GIF，-f2.6" --size 896x896 --api-output-format gif --frame-count 8 --frame-duration-ms 200`
+
+GIF uses the same one-submit generation/edit route and task recovery. The local
+`--output-format` flag is a separate still-image conversion option; do not use
+it to request animation. No local resize/crop/re-encoding, storyboard stitching,
+or still-to-GIF renaming is permitted as a substitute for native animation.
+The script saves original bytes with `.gif`, inspects the complete container,
+and returns `media` with frame count/durations plus `requested_output_satisfied`.
+Only report animated GIF success when `ok` and `requested_output_satisfied` are
+true. Also show `output_warning` and `animation_control_mismatches` when present:
+`animation_controls_satisfied: false` means the upstream changed requested frame
+settings. Report actual frames/durations; do not claim exact parameter compliance. If the upstream returns a still, explain that this request did not produce
+animation, retain its original file, and never automatically submit again.
+Render returned GIF paths directly; if the client's inline renderer freezes a
+frame, provide the original GIF link without replacing it with a PNG preview.
+Actual model/channel availability is confirmed by the current response.
 
 ### Midjourney-specific flow
 
@@ -56,6 +102,11 @@ For an MJ-group API key, no model marker means `midjourney-v8.2`. Only an explic
   this route cannot guarantee it before submitting. Only use `--output-size`
   when the user explicitly requests local resizing; label the result as a
   resized image and preserve the original, never claim it is native 4K.
+- The result includes `delivery_timing`: API wait, status-poll wait, and local
+  delivery times. These are separate from Codex response/render time; do not
+  call the entire duration a local display delay. Download up to four returned
+  URLs concurrently, preserving original order and bytes; never repeat a paid
+  submit to accelerate delivery.
 - Wait on the same running command until the terminal result. Do not repeat
   the paid POST on a timeout. Successful output must include four saved image
   paths, correct `actual_model`, and actual dimensions. Render the current

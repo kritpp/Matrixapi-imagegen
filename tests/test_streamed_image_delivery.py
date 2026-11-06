@@ -38,6 +38,25 @@ class _ImageHandler(http.server.BaseHTTPRequestHandler):
 
 
 class StreamedImageDeliveryTest(unittest.TestCase):
+    def test_truncated_transfer_never_publishes_a_result(self):
+        class TruncatedHandler(_ImageHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type','image/png')
+                self.send_header('Content-Length',str(len(self.payload)))
+                self.end_headers()
+                self.wfile.write(self.payload[:4096])
+        server=socketserver.TCPServer(('127.0.0.1',0),TruncatedHandler)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with self.assertRaises(GENERATE.ImageGenError):
+                    GENERATE.save_images({'data':[{'url':f'http://127.0.0.1:{server.server_address[1]}/image'}]},'http://127.0.0.1:3000/v1/images/generations','',Path(temp_dir),30,task_id='task-truncated')
+                self.assertFalse(list(Path(temp_dir).rglob('*.png')))
+                self.assertFalse(list(Path(temp_dir).rglob('*.part')))
+        finally:
+            server.shutdown();server.server_close()
+
     def test_result_url_streams_to_part_file_then_publishes(self):
         server = socketserver.TCPServer(("127.0.0.1", 0), _ImageHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
